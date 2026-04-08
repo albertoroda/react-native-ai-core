@@ -1,7 +1,7 @@
 buildscript {
   ext.AiCore = [
     kotlinVersion: "2.0.21",
-    minSdkVersion: 24,
+    minSdkVersion: 26,
     compileSdkVersion: 36,
     targetSdkVersion: 36
   ]
@@ -64,4 +64,13 @@ android {
 
 dependencies {
   implementation "com.facebook.react:react-android"
+
+  // Google AI Edge — MediaPipe Tasks GenAI (modelo de archivo local)
+  implementation "com.google.mediapipe:tasks-genai:0.10.22"
+
+  // ML Kit GenAI Prompt API — accede a Gemini Nano vía AICore (Pixel 8+, sin archivo)
+  implementation "com.google.mlkit:genai-prompt:1.0.0-beta2"
+
+  // Coroutines (requerido por ML Kit Flow API)
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
 }

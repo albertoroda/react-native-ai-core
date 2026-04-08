@@ -1,6 +1,6 @@
 {
   "name": "react-native-ai-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "High-performance AI bridge for React Native using Google AI Edge MediaPipe and Gemini Nano",
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
@@ -41,8 +41,22 @@
   },
   "keywords": [
     "react-native",
-    "ios",
-    "android"
+    "android",
+    "ai",
+    "llm",
+    "gemini",
+    "gemini-nano",
+    "on-device",
+    "npu",
+    "mediapipe",
+    "ml-kit",
+    "aicore",
+    "inference",
+    "turbo-module",
+    "new-architecture",
+    "streaming",
+    "local-llm",
+    "privacy"
   ],
   "repository": {
     "type": "git",
@@ -56,6 +70,9 @@
   "homepage": "https://github.com/albertofernandezroda/react-native-ai-core#readme",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@eslint/compat": "^2.0.3",

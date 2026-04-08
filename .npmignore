@@ -1,0 +1,38 @@
+# Files and directories excluded from the npm package
+
+# Example app (not needed by consumers)
+example/
+
+# GitHub workflows and issue templates
+.github/
+
+# Development config files
+.editorconfig
+.eslintrc*
+eslint.config.*
+.nvmrc
+.watchmanconfig
+.yarnrc.yml
+turbo.json
+babel.config.js
+tsconfig.json
+
+# Yarn
+.yarn/
+yarn.lock
+
+# Build cache
+android/build/
+ios/build/
+lib/typescript/
+
+# Test files
+__tests__/
+__fixtures__/
+__mocks__/
+**/*.test.*
+**/*.spec.*
+
+# CI / Misc
+.DS_Store
+*.log
