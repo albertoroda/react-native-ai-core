@@ -91,6 +91,11 @@ jobs:
         run: |
           yarn example expo prebuild --platform android
 
+      - name: Ensure minSdkVersion=26 in gradle.properties
+        if: env.turbo_cache_hit != 1
+        run: |
+          sed -i 's/^minSdkVersion=.*/minSdkVersion=26/' example/android/gradle.properties
+
       - name: Cache Gradle
         if: env.turbo_cache_hit != 1
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
