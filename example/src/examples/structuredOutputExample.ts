@@ -132,7 +132,10 @@ function buildDeterministicWorkoutPlan(): WorkoutPlan {
   };
 }
 
-export async function classifySupportMessage(message: string) {
+export async function classifySupportMessage(
+  message: string,
+  signal?: AbortSignal
+) {
   return generateStructuredResponse({
     prompt:
       'Classify the user message for an internal support workflow. Keep the summary concise.',
@@ -145,11 +148,13 @@ export async function classifySupportMessage(message: string) {
     output: SupportTicketSchema,
     maxRetries: 2,
     timeoutMs: 180000,
+    signal,
   });
 }
 
 export async function buildWeeklyWorkoutPlan(
-  onProgress?: (field: string, done: boolean) => void
+  onProgress?: (field: string, done: boolean) => void,
+  signal?: AbortSignal
 ) {
   try {
     const generated = await generateStructuredResponse({
@@ -160,10 +165,13 @@ export async function buildWeeklyWorkoutPlan(
       maxRetries: 2,
       timeoutMs: 90000,
       onProgress,
+      signal,
     });
 
     return normalizeWorkoutPlan(generated);
-  } catch {
+  } catch (err) {
+    // Re-throw if user deliberately cancelled
+    if ((err as { name?: string }).name === 'AbortError') throw err;
     // Never fail the example UX because of on-device timeout/quota.
     onProgress?.('fallback.localPlan', false);
     const fallback = buildDeterministicWorkoutPlan();

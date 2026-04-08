@@ -7,12 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-04-08
+
+### Added
+
+- **`cancelGeneration()`** — new API to stop an in-progress generation at any time.
+  - Streaming (`generateResponseStream`): stops the token stream and fires `onComplete` cleanly (no error event).
+  - Blocking (`generateResponse`): rejects the pending promise with `{ code: 'CANCELLED' }`.
+  - Available as a named export (`cancelGeneration`) and on the default `AICore` object.
+- **`signal?: AbortSignal` in `generateStructuredResponse`** — pass a standard `AbortSignal` to cancel the chunked tree-walker mid-flight.
+  - Each inter-field `sleep` respects the signal immediately; rejects with `Error { name: 'AbortError' }` as soon as abort is called.
+  - Also plumbed through all internal helpers: `generateStateless`, `generateStatelessWithTimeout`, `generateStatelessWithQuotaRetry`, `tryGenerateWithQuotaTolerance`, and `generateChunked`.
+- Stop button (■) in the example app replaces the send button while generation is in progress.
+- Compact inline stop pill in the structured-output preview banner.
+
+### Changed
+
+- `generateStructuredResponse` options table expanded with `strategy`, `maxContinuations`, `timeoutMs`, `onProgress` and `signal` fields in the README.
+
+### Fixed
+
+- Streaming stop no longer emits `onError` after `cancelGeneration()` — the inner catch now checks the cancel flag before forwarding the exception.
+- Structured chunked generation (complex JSON) now stops immediately on cancel instead of completing the current field tree.
+
+---
+
 ## [Unreleased]
 
 ### Planned
 - iOS support (Core ML / Apple Neural Engine)
 - Automatic model download manager
-- Abort/cancel streaming mid-generation
 - System prompt / persona configuration
 - Token count estimation
 

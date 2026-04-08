@@ -27,6 +27,11 @@ export interface StructuredGenerateOptions<
    * @param done   true when the field has just been completed
    */
   onProgress?: (field: string, done: boolean) => void;
+  /**
+   * Optional AbortSignal to cancel the generation mid-way.
+   * When aborted, the promise rejects with an Error whose `name` is `'AbortError'`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface StructuredValidationIssue {
@@ -61,8 +66,28 @@ const QUOTA_ERROR_CODE = 9;
 const QUOTA_RETRY_DELAY_MS = 1800;
 const MAX_QUOTA_RETRIES = 2;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function makeAbortError(): Error {
+  return Object.assign(new Error('Generation cancelled.'), {
+    name: 'AbortError',
+  });
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(makeAbortError());
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(makeAbortError());
+      },
+      { once: true }
+    );
+  });
 }
 
 function toErrorMessage(error: unknown): string {
@@ -445,12 +470,17 @@ function buildRepairPrompt(
   ]);
 }
 
-async function generateStateless(prompt: string): Promise<string> {
+async function generateStateless(
+  prompt: string,
+  signal?: AbortSignal
+): Promise<string> {
   if (!NativeAiCore) {
     throw new Error(
       `react-native-ai-core: native module unavailable on ${Platform.OS}. This feature requires Android.`
     );
   }
+
+  if (signal?.aborted) throw makeAbortError();
 
   if (NativeAiCore?.generateResponseStateless) {
     return NativeAiCore.generateResponseStateless(prompt);
@@ -461,10 +491,11 @@ async function generateStateless(prompt: string): Promise<string> {
 
 async function generateStatelessWithTimeout(
   prompt: string,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<string> {
   if (timeoutMs <= 0) {
-    return generateStateless(prompt);
+    return generateStateless(prompt, signal);
   }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -475,7 +506,7 @@ async function generateStatelessWithTimeout(
   });
 
   try {
-    return await Promise.race([generateStateless(prompt), timeout]);
+    return await Promise.race([generateStateless(prompt, signal), timeout]);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -483,29 +514,33 @@ async function generateStatelessWithTimeout(
 
 async function generateStatelessWithQuotaRetry(
   prompt: string,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<string> {
   let quotaRetries = 0;
   while (true) {
     try {
-      return await generateStatelessWithTimeout(prompt, timeoutMs);
+      return await generateStatelessWithTimeout(prompt, timeoutMs, signal);
     } catch (error) {
+      if ((error as { name?: string }).name === 'AbortError') throw error;
       if (!isQuotaError(error) || quotaRetries >= MAX_QUOTA_RETRIES) {
         throw error;
       }
       quotaRetries += 1;
-      await sleep(QUOTA_RETRY_DELAY_MS);
+      await sleep(QUOTA_RETRY_DELAY_MS, signal);
     }
   }
 }
 
 async function tryGenerateWithQuotaTolerance(
   prompt: string,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<string | null> {
   try {
-    return await generateStatelessWithQuotaRetry(prompt, timeoutMs);
+    return await generateStatelessWithQuotaRetry(prompt, timeoutMs, signal);
   } catch (error) {
+    if ((error as { name?: string }).name === 'AbortError') throw error;
     if (isQuotaError(error)) {
       return null;
     }
@@ -548,6 +583,7 @@ interface WalkContext {
   /** Label for onProgress — overrides the computed path when set */
   progressLabel?: string;
   onProgress?: (field: string, done: boolean) => void;
+  signal?: AbortSignal;
 }
 
 interface ArrayCountBounds {
@@ -811,9 +847,13 @@ async function walkLeaf(
   let lastRaw = '';
   let lastErrorMessage = '';
   for (let attempt = 0; attempt <= leafMaxRetries; attempt++) {
-    if (attempt > 0) await sleep(INTER_CALL_DELAY_MS);
+    if (attempt > 0) await sleep(INTER_CALL_DELAY_MS, ctx.signal);
     try {
-      lastRaw = await generateStatelessWithQuotaRetry(prompt, leafTimeoutMs);
+      lastRaw = await generateStatelessWithQuotaRetry(
+        prompt,
+        leafTimeoutMs,
+        ctx.signal
+      );
       const coerced = coercePrimitiveField(lastRaw, schema);
       const validated = schema.safeParse(coerced);
       if (validated.success) {
@@ -869,7 +909,8 @@ async function walkCompact(
   const compactTimeoutMs = Math.min(ctx.timeoutMs, COMPACT_TIMEOUT_CAP_MS);
   let combined = await generateStatelessWithQuotaRetry(
     prompt,
-    compactTimeoutMs
+    compactTimeoutMs,
+    ctx.signal
   );
 
   for (let cont = 0; cont < 6; cont++) {
@@ -880,7 +921,7 @@ async function walkCompact(
     } catch {
       if (!looksLikeIncompleteJson(combined)) break;
     }
-    await sleep(INTER_CALL_DELAY_MS);
+    await sleep(INTER_CALL_DELAY_MS, ctx.signal);
     const extra = await tryGenerateWithQuotaTolerance(
       buildStructuredContinuationPrompt(
         ctx.taskPrompt,
@@ -888,7 +929,8 @@ async function walkCompact(
         combined,
         ctx.input
       ),
-      compactTimeoutMs
+      compactTimeoutMs,
+      ctx.signal
     );
     if (!extra) break;
     const merged = mergeStructuredFragments(combined, extra);
@@ -913,9 +955,13 @@ async function askArrayCount(
   ]);
 
   try {
-    await sleep(INTER_CALL_DELAY_MS);
+    await sleep(INTER_CALL_DELAY_MS, ctx.signal);
     const countTimeoutMs = Math.min(ctx.timeoutMs, ARRAY_COUNT_TIMEOUT_CAP_MS);
-    const raw = await generateStatelessWithQuotaRetry(prompt, countTimeoutMs);
+    const raw = await generateStatelessWithQuotaRetry(
+      prompt,
+      countTimeoutMs,
+      ctx.signal
+    );
     const n = parseInt(raw.trim().replace(/\D/g, ''), 10);
     if (Number.isFinite(n) && n >= bounds.min && n <= bounds.max) return n;
   } catch {
@@ -931,7 +977,7 @@ async function walkSchema(
   const inner = unwrapModifiers(schema);
 
   if (isLeafSchema(inner)) {
-    await sleep(INTER_CALL_DELAY_MS);
+    await sleep(INTER_CALL_DELAY_MS, ctx.signal);
     return walkLeaf(inner, ctx);
   }
 
@@ -952,7 +998,7 @@ async function walkSchema(
       count <= MAX_WHOLE_ARRAY_COMPACT_ITEMS
     ) {
       ctx.onProgress?.(arrayLabel, false);
-      await sleep(INTER_CALL_DELAY_MS);
+      await sleep(INTER_CALL_DELAY_MS, ctx.signal);
       const result = await walkCompact(inner, {
         ...ctx,
         progressLabel: arrayLabel,
@@ -966,7 +1012,7 @@ async function walkSchema(
     const items: unknown[] = [];
 
     for (let i = 0; i < count; i++) {
-      await sleep(INTER_CALL_DELAY_MS);
+      await sleep(INTER_CALL_DELAY_MS, ctx.signal);
       const elemLabel = `${arrayLabel}[${i + 1}/${count}]`;
       const elemCtx: WalkContext = {
         ...ctx,
@@ -983,7 +1029,7 @@ async function walkSchema(
 
   // Compact object: single call (except at root where per-field gives better progress).
   if (isCompactSchema(inner) && ctx.path.length > 0) {
-    await sleep(INTER_CALL_DELAY_MS);
+    await sleep(INTER_CALL_DELAY_MS, ctx.signal);
     return walkCompact(inner, ctx);
   }
 
@@ -1007,10 +1053,10 @@ async function walkSchema(
           progressLabel: [...ctx.path, key].join('.'),
         };
         if (isLeafSchema(unwrapModifiers(fieldSchema as ZodTypeAny))) {
-          await sleep(INTER_CALL_DELAY_MS);
+          await sleep(INTER_CALL_DELAY_MS, ctx.signal);
           result[key] = await walkLeaf(fieldSchema as ZodTypeAny, fieldCtx);
         } else {
-          await sleep(INTER_CALL_DELAY_MS);
+          await sleep(INTER_CALL_DELAY_MS, ctx.signal);
           result[key] = await walkCompact(fieldSchema as ZodTypeAny, fieldCtx);
         }
       }
@@ -1026,7 +1072,7 @@ async function walkSchema(
     return result;
   }
 
-  await sleep(INTER_CALL_DELAY_MS);
+  await sleep(INTER_CALL_DELAY_MS, ctx.signal);
   return walkLeaf(inner, ctx);
 }
 
@@ -1036,7 +1082,8 @@ async function generateChunked<TOutputSchema extends ZodTypeAny, TInput>(
   input: TInput | undefined,
   timeoutMs: number,
   maxRetries: number,
-  onProgress?: (field: string, done: boolean) => void
+  onProgress?: (field: string, done: boolean) => void,
+  signal?: AbortSignal
 ): Promise<unknown> {
   return walkSchema(schema, {
     taskPrompt: prompt,
@@ -1045,6 +1092,7 @@ async function generateChunked<TOutputSchema extends ZodTypeAny, TInput>(
     maxRetries,
     path: [],
     onProgress,
+    signal,
   });
 }
 
@@ -1064,6 +1112,7 @@ export async function generateStructuredResponse<
     timeoutMs = DEFAULT_STRUCTURED_TIMEOUT_MS,
     strategy = 'single',
     onProgress,
+    signal,
   } = options;
 
   if (inputSchema && input !== undefined) {
@@ -1077,7 +1126,8 @@ export async function generateStructuredResponse<
       input,
       timeoutMs,
       maxRetries,
-      onProgress
+      onProgress,
+      signal
     );
     return output.parse(assembled);
   }
@@ -1086,6 +1136,7 @@ export async function generateStructuredResponse<
   let lastIssues: StructuredValidationIssue[] = [];
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) throw makeAbortError();
     lastRawResponse =
       attempt === 0
         ? await generateStructuredRawResponse(
@@ -1097,7 +1148,8 @@ export async function generateStructuredResponse<
           )
         : await generateStatelessWithQuotaRetry(
             buildRepairPrompt(prompt, output, lastRawResponse, lastIssues),
-            timeoutMs
+            timeoutMs,
+            signal
           );
 
     try {

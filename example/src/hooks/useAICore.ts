@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import AICore, {
   type AvailabilityStatus,
   type AIError,
+  cancelGeneration,
 } from 'react-native-ai-core';
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
@@ -41,6 +42,7 @@ export interface UseAICoreReturn {
   // Acciones
   initialize: (modelPath: string) => Promise<void>;
   sendMessage: (prompt: string, stream?: boolean) => Promise<void>;
+  stopGeneration: () => void;
   clearMessages: () => void;
   release: () => Promise<void>;
 }
@@ -173,6 +175,10 @@ export function useAICore(
         addMessage({ role: 'assistant', content: response });
         setEngineStatus('ready');
       } catch (e: any) {
+        if (e?.code === 'CANCELLED') {
+          setEngineStatus('ready');
+          return;
+        }
         const msg = e?.message ?? 'Failed to generate response';
         addMessage({ role: 'assistant', content: `[Error: ${msg}]`, error: true });
         setEngineStatus('ready');
@@ -181,6 +187,11 @@ export function useAICore(
     },
     []
   );
+
+  // ── stopGeneration ──────────────────────────────────────────────────────────
+  const stopGeneration = useCallback(() => {
+    cancelGeneration().catch(() => {});
+  }, []);
 
   // ── clearMessages ───────────────────────────────────────────────────────────
   const clearMessages = useCallback(() => {
@@ -210,6 +221,7 @@ export function useAICore(
     errorMessage,
     initialize,
     sendMessage,
+    stopGeneration,
     clearMessages,
     release,
   };

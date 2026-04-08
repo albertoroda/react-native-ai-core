@@ -116,6 +116,7 @@ For app-internal AI features such as extraction, classification, routing, or too
 - Validates the final payload with `zod`
 - Retries automatically with a repair prompt when validation fails
 - Uses a stateless native request so it does not pollute chat conversation history
+- Supports an `AbortSignal` to cancel mid-generation
 
 ```tsx
 import { z } from 'zod';
@@ -128,13 +129,19 @@ const TicketSchema = z.object({
   needsHuman: z.boolean(),
 });
 
+const ctrl = new AbortController();
+
 const result = await generateStructuredResponse({
   prompt: 'Classify this support request and summarize it.',
   input: {
     message: 'The app crashes when I try to export a PDF invoice.',
   },
   output: TicketSchema,
+  signal: ctrl.signal,
 });
+
+// Cancel mid-way
+ctrl.abort();
 ```
 
 Recommended for reliability on-device:
@@ -145,6 +152,43 @@ Recommended for reliability on-device:
 - Repair retries are bounded and prompt size is trimmed internally to avoid hitting the same context limits as chat flows
 
 There is also a concrete demo helper in [example/src/examples/structuredOutputExample.ts](example/src/examples/structuredOutputExample.ts).
+
+### Cancelling generation
+
+Both chat and structured generation can be stopped at any point.
+
+**Chat / streaming:**
+
+```tsx
+import { cancelGeneration } from 'react-native-ai-core';
+
+// Stop an ongoing generateResponse or generateResponseStream call
+await cancelGeneration();
+```
+
+For streaming, the `onComplete` callback fires normally after cancellation — `onError` is not called.
+
+**Structured output:**
+
+Pass an `AbortSignal` from an `AbortController` to `generateStructuredResponse`. When you call `ctrl.abort()` the tree-walker stops at the next field boundary and rejects with an `Error` whose `name` is `'AbortError'`.
+
+```tsx
+const ctrl = new AbortController();
+
+// Start generation
+const promise = generateStructuredResponse({ ..., signal: ctrl.signal });
+
+// Cancel from a button handler
+ctrl.abort();
+
+try {
+  await promise;
+} catch (err) {
+  if (err.name === 'AbortError') {
+    console.log('Cancelled by user');
+  }
+}
+```
 
 ---
 
@@ -164,6 +208,23 @@ Returns `true` on success. Throws on failure.
 - `MODEL_NOT_FOUND` — file at `modelPath` does not exist
 - `NPU_UNSUPPORTED` — device NPU is not compatible
 - `INIT_FAILED` — engine failed to start
+
+---
+
+### `cancelGeneration(): Promise<void>`
+
+Cancels the in-progress generation immediately.
+
+- For **streaming** (`generateResponseStream`): stops the token stream and fires `onComplete` (not `onError`).
+- For **blocking** (`generateResponse`): rejects the pending promise with code `CANCELLED`.
+- Safe to call even when no generation is running.
+
+```tsx
+await AICore.cancelGeneration();
+// or named export:
+import { cancelGeneration } from 'react-native-ai-core';
+await cancelGeneration();
+```
 
 ---
 
@@ -193,19 +254,30 @@ const OutputSchema = z.object({
   confidence: z.number(),
 });
 
+const ctrl = new AbortController();
+
 const output = await generateStructuredResponse({
   prompt: 'Determine the next action for this message.',
   input: { message: 'Can you send me the invoice again?' },
   output: OutputSchema,
+  signal: ctrl.signal,
 });
 ```
 
 Options:
-- `prompt` — natural language instruction
-- `input` — optional structured input object
-- `inputSchema` — optional `zod` schema to validate the input before generation
-- `output` — required `zod` schema used to validate the model output
-- `maxRetries` — optional number of repair attempts when validation fails
+
+| Option | Type | Description |
+|---|---|---|
+| `prompt` | `string` | Natural language instruction |
+| `input` | `unknown` | Optional structured input object |
+| `inputSchema` | `ZodType` | Optional schema to validate `input` before generation |
+| `output` | `ZodType` | Required schema to validate the model output |
+| `strategy` | `'single' \| 'chunked'` | `'single'` (default) generates the whole JSON in one call. `'chunked'` walks the schema field-by-field — use for large or complex schemas |
+| `maxRetries` | `number` | Repair attempts when validation fails (default `2`) |
+| `maxContinuations` | `number` | Max continuation calls when JSON is truncated (default `8`) |
+| `timeoutMs` | `number` | Per-call timeout in ms (default `300000`) |
+| `onProgress` | `(field, done) => void` | Called for each field during `'chunked'` generation |
+| `signal` | `AbortSignal` | Pass a signal to cancel mid-generation. Rejects with `Error { name: 'AbortError' }` |
 
 Throws `StructuredOutputError` if valid JSON matching the schema cannot be produced after retries.
 
@@ -294,6 +366,7 @@ A ready-to-use React hook is available in the example app as a reference impleme
 - Streaming with incremental message updates
 - Conversation history reset on clear
 - Error state management
+- `stopGeneration()` — calls `cancelGeneration()` to abort the in-progress response
 
 See [`example/src/hooks/useAICore.ts`](example/src/hooks/useAICore.ts).
 
@@ -326,7 +399,7 @@ Dependency: `com.google.mediapipe:tasks-genai:0.10.22`
 - [ ] Model quantization options
 - [ ] System prompt / persona configuration
 - [ ] Token count estimation
-- [ ] Abort/cancel streaming mid-generation
+- [x] Abort/cancel streaming mid-generation
 - [ ] Web support (WebGPU / WASM)
 
 ---

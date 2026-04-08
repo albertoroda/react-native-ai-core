@@ -19,6 +19,7 @@ import com.google.mlkit.genai.prompt.TextPart
 import com.google.mlkit.genai.prompt.generateContentRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -39,6 +40,8 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
   private val conversationHistory = mutableListOf<Pair<String, String>>()
+  @Volatile private var cancelRequested = false
+  @Volatile private var activeGenerationJob: Job? = null
 
   companion object {
     const val NAME = NativeAiCoreSpec.NAME
@@ -439,6 +442,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
     val mlkit = mlkitModel
     val mediapipe = llmInference
     startInferenceService()
+    cancelRequested = false
     when {
       mlkit != null -> coroutineScope.launch {
         try {
@@ -449,6 +453,11 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
           var continuationJoinPending = false
           var quotaRetries = 0
           while (true) {
+            if (cancelRequested) {
+              stopInferenceService()
+              promise.reject("CANCELLED", "Generation cancelled.")
+              return@launch
+            }
             val part = try {
               generateMlKitChunk(mlkit, currentPrompt)
             } catch (e: GenAiException) {
@@ -495,10 +504,15 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
           stopInferenceService()
           promise.resolve(full)
         } catch (e: Exception) {
-          stopInferenceService()
-          promise.reject("GENERATION_ERROR", e.message, e)
+          if (cancelRequested) {
+            stopInferenceService()
+            promise.reject("CANCELLED", "Generation cancelled.")
+          } else {
+            stopInferenceService()
+            promise.reject("GENERATION_ERROR", e.message, e)
+          }
         }
-      }
+      }.also { activeGenerationJob = it }
       mediapipe != null -> executor.execute {
         var session: LlmInferenceSession? = null
         try {
@@ -508,6 +522,11 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
           var continuations = 0
           var continuationJoinPending = false
           while (true) {
+            if (cancelRequested) {
+              stopInferenceService()
+              promise.reject("CANCELLED", "Generation cancelled.")
+              return@execute
+            }
             session = createMediaPipeSession()
             session.addQueryChunk(currentPrompt)
             val part = session.generateResponse()
@@ -558,6 +577,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
     val mlkit = mlkitModel
     val mediapipe = llmInference
     startInferenceService()
+    cancelRequested = false
     when {
       mlkit != null -> coroutineScope.launch {
         val total = StringBuilder()
@@ -571,6 +591,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
         var markerReached = false
         try {
           while (true) {
+            if (cancelRequested) break
             val beforeLength = total.length
             firstDeltaInPass = true
             var quotaHit = false
@@ -605,6 +626,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
                 throw e
               }
             } catch (e: Exception) {
+              if (cancelRequested) break
               streamError = true
               stopInferenceService()
               sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", e.message ?: "Error"))
@@ -630,17 +652,21 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
               delay(if (quotaHit) QUOTA_RETRY_DELAY_MS else CONTINUATION_DELAY_MS)
             } else break
           }
-          saveToHistory(prompt, sanitizeVisibleText(total.toString()))
+          if (!cancelRequested) saveToHistory(prompt, sanitizeVisibleText(total.toString()))
           emitStreamToken("", true)
           stopInferenceService()
           sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
         } catch (e: Exception) {
-          if (!streamError) {
+          if (cancelRequested) {
+            emitStreamToken("", true)
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
+          } else if (!streamError) {
             stopInferenceService()
             sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", e.message ?: "Error"))
           }
         }
-      }
+      }.also { activeGenerationJob = it }
       mediapipe != null -> executor.execute {
         val total = StringBuilder()
         val rawTotal = StringBuilder()
@@ -652,12 +678,18 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
         var markerReached = false
         try {
           while (true) {
+            if (cancelRequested) break
             val latch = CountDownLatch(1)
             firstDeltaInPass = true
             session = createMediaPipeSession()
             val capturedSession = session
             session.addQueryChunk(currentPrompt)
             session.generateResponseAsync(ProgressListener<String> { partial, done ->
+              if (cancelRequested) {
+                capturedSession.close()
+                latch.countDown()
+                return@ProgressListener
+              }
               val token = partial ?: ""
               rawTotal.append(token)
               if (containsEndMarker(rawTotal.toString())) {
@@ -694,14 +726,20 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
               continuationJoinPending = true
             } else break
           }
-          saveToHistory(prompt, sanitizeVisibleText(total.toString()))
+          if (!cancelRequested) saveToHistory(prompt, sanitizeVisibleText(total.toString()))
           emitStreamToken("", true)
           stopInferenceService()
           sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
         } catch (e: Exception) {
           session?.close()
-          stopInferenceService()
-          sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", e.message ?: "Error"))
+          if (cancelRequested) {
+            emitStreamToken("", true)
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
+          } else {
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", e.message ?: "Error"))
+          }
         }
       }
       else -> sendEvent(EVENT_STREAM_ERROR, createErrorMap("NOT_INITIALIZED", "LLM not initialized."))
@@ -749,6 +787,12 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
 
   override fun resetConversation(promise: Promise) {
     resetHistory()
+    promise.resolve(null)
+  }
+
+  override fun cancelGeneration(promise: Promise) {
+    cancelRequested = true
+    activeGenerationJob?.cancel()
     promise.resolve(null)
   }
 

@@ -51,6 +51,13 @@ export interface Spec extends TurboModule {
    */
   resetConversation(): Promise<void>;
 
+  /**
+   * Cancels any generation currently in progress.
+   * For streaming: the stream ends with the tokens generated so far.
+   * For non-streaming: the pending promise rejects with code 'CANCELLED'.
+   */
+  cancelGeneration(): Promise<void>;
+
   // Required by NativeEventEmitter
   addListener(eventName: string): void;
   removeListeners(count: number): void;

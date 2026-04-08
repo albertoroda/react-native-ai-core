@@ -10,7 +10,6 @@
 
 import { useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -60,6 +59,7 @@ export default function App() {
   >(null);
 
   const flatListRef = useRef<FlatList<Message>>(null);
+  const structuredAbortRef = useRef<AbortController | null>(null);
 
   const {
     availability,
@@ -69,6 +69,7 @@ export default function App() {
     errorMessage,
     initialize,
     sendMessage,
+    stopGeneration,
     clearMessages,
     release,
   } = useAICore(modelPath);
@@ -92,6 +93,11 @@ export default function App() {
     clearMessages();
   };
 
+  const handleStop = () => {
+    stopGeneration();
+    structuredAbortRef.current?.abort();
+  };
+
   const runStructuredSupportExample = async () => {
     if (engineStatus !== 'ready' || runningStructuredExample) return;
     setConfigExpanded(true);
@@ -99,14 +105,20 @@ export default function App() {
     setStructuredResult(null);
     setStructuredProgress(null);
     setRunningStructuredExample('support');
+    const ctrl = new AbortController();
+    structuredAbortRef.current = ctrl;
     try {
       const result = await classifySupportMessage(
-        'The app crashes every time I try to export a PDF invoice from the billing screen.'
+        'The app crashes every time I try to export a PDF invoice from the billing screen.',
+        ctrl.signal
       );
       setStructuredResult(JSON.stringify(result, null, 2));
     } catch (error: any) {
-      setStructuredError(error?.message ?? 'Structured example failed');
+      if (error?.code !== 'CANCELLED' && error?.name !== 'AbortError') {
+        setStructuredError(error?.message ?? 'Structured example failed');
+      }
     } finally {
+      structuredAbortRef.current = null;
       setRunningStructuredExample(null);
       setStructuredProgress(null);
     }
@@ -119,14 +131,21 @@ export default function App() {
     setStructuredResult(null);
     setStructuredProgress(null);
     setRunningStructuredExample('complex');
+    const ctrl = new AbortController();
+    structuredAbortRef.current = ctrl;
     try {
       const result = await buildWeeklyWorkoutPlan((field, done) => {
         setStructuredProgress(done ? `✓ ${field}` : `⏳ ${field}`);
-      });
+      }, ctrl.signal);
       setStructuredResult(JSON.stringify(result, null, 2));
     } catch (error: any) {
-      setStructuredError(error?.message ?? 'Complex structured example failed');
+      if (error?.code !== 'CANCELLED' && error?.name !== 'AbortError') {
+        setStructuredError(
+          error?.message ?? 'Complex structured example failed'
+        );
+      }
     } finally {
+      structuredAbortRef.current = null;
       setRunningStructuredExample(null);
       setStructuredProgress(null);
     }
@@ -279,7 +298,7 @@ export default function App() {
               disabled={!canInit}
             >
               {engineStatus === 'initializing' ? (
-                <ActivityIndicator color="#fff" size="small" />
+                <Text style={styles.btnTextLight}>…</Text>
               ) : (
                 <Text style={styles.btnTextLight}>Initialise</Text>
               )}
@@ -400,6 +419,9 @@ export default function App() {
                   {structuredProgress}
                 </Text>
               ) : null}
+              <Pressable style={styles.stopBtnInline} onPress={handleStop}>
+                <Text style={styles.stopBtnInlineText}>■ Stop</Text>
+              </Pressable>
             </>
           ) : structuredError ? (
             <Text style={styles.errorText}>{structuredError}</Text>
@@ -467,17 +489,19 @@ export default function App() {
             onSubmitEditing={handleSend}
             blurOnSubmit={false}
           />
-          <Pressable
-            style={[styles.sendBtn, !canSend && styles.sendBtnDisabled]}
-            onPress={handleSend}
-            disabled={!canSend}
-          >
-            {engineStatus === 'generating' ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
+          {engineStatus === 'generating' || isStreaming ? (
+            <Pressable style={styles.stopBtn} onPress={handleStop}>
+              <Text style={styles.stopBtnText}>■</Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              style={[styles.sendBtn, !canSend && styles.sendBtnDisabled]}
+              onPress={handleSend}
+              disabled={!canSend}
+            >
               <Text style={styles.sendIcon}>↑</Text>
-            )}
-          </Pressable>
+            </Pressable>
+          )}
         </View>
 
         {/* Active mode indicator */}
@@ -693,6 +717,19 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 2,
   },
+  stopBtnInline: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    borderRadius: 14,
+    backgroundColor: '#ef4444',
+    marginTop: 2,
+  },
+  stopBtnInlineText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
 
   // Empty state
   emptyState: {
@@ -760,6 +797,19 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     marginBottom: 2,
+  },
+  stopBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#ef4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stopBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
   },
   modeBar: {
     paddingHorizontal: 16,

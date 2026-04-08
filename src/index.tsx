@@ -211,6 +211,19 @@ export async function resetConversation(): Promise<void> {
   return NativeAiCore.resetConversation();
 }
 
+/**
+ * Cancels any generation currently in progress.
+ *
+ * - **Streaming**: the stream ends immediately with tokens generated so far.
+ * - **Non-streaming**: the pending `generateResponse` promise rejects with code `'CANCELLED'`.
+ *
+ * Safe to call when no generation is running.
+ */
+export async function cancelGeneration(): Promise<void> {
+  if (!NativeAiCore) return;
+  return NativeAiCore.cancelGeneration();
+}
+
 // ── Default export (API object) ───────────────────────────────────────────────
 
 const AICore = {
@@ -221,6 +234,7 @@ const AICore = {
   checkAvailability,
   release,
   resetConversation,
+  cancelGeneration,
 };
 
 export default AICore;
