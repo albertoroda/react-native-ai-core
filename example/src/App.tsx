@@ -312,6 +312,25 @@ export default function App() {
           {(structuredResult || structuredError) && (
             <View style={styles.structuredBox}>
               <Text style={styles.structuredTitle}>Structured output result</Text>
+              {structuredError ? (
+                <Text style={styles.errorText}>{structuredError}</Text>
+              ) : (
+                <ScrollView
+                  style={styles.structuredCodeViewport}
+                  nestedScrollEnabled
+                >
+                  <ScrollView horizontal nestedScrollEnabled>
+                    <Text style={styles.structuredCode}>{structuredResult}</Text>
+                  </ScrollView>
+                </ScrollView>
+              )}
+            </View>
+          )}
+
+          {errorMessage && (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>⚠ {errorMessage}</Text>
+            </View>
           )}
         </ScrollView>
       )}
@@ -351,7 +370,7 @@ export default function App() {
         behavior="padding"
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
-        {/* ── Lista de mensajes ─────────────────────────────────────────────── */}
+        {/* ── Message list ──────────────────────────────────────────────────── */}
         {messages.length === 0 ? (
           <View style={styles.emptyState}>
             <Text style={styles.emptyIcon}>🤖</Text>
