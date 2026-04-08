@@ -47,7 +47,14 @@ Add to `android/gradle.properties`:
 minSdkVersion=26
 ```
 
-No additional permissions are required. The native module is auto-linked.
+The native module is auto-linked. No manual permission declarations are needed — the library's `AndroidManifest.xml` is merged automatically into your app and includes:
+
+- `FOREGROUND_SERVICE` — keeps the process alive during background generation
+- `FOREGROUND_SERVICE_DATA_SYNC` — required foreground service type (Android 14+)
+
+These permissions will appear in your compiled app manifest and may be visible in Play Store security reviews.
+
+> **Note:** Testing requires a physical Android device. The Android emulator does not support NPU hardware or the AICore system service, so the ML Kit AICore backend will not function on it. The MediaPipe backend may run in an emulator but is not officially supported or tested in that environment.
 
 ---
 
@@ -336,7 +343,7 @@ Contributions, issues and feature requests are welcome.
 
 ## License
 
-MIT © [Alberto Fernandez](https://github.com/albertofernandezroda)
+MIT © [Alberto Fernandez](https://github.com/albertoroda)
 
 ---
 

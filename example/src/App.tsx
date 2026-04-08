@@ -22,7 +22,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 import { StatusBadge } from './components/StatusBadge';
 import { MessageBubble } from './components/MessageBubble';
 import { useAICore, type Message } from './hooks/useAICore';
@@ -49,7 +52,9 @@ export default function App() {
   const [configExpanded, setConfigExpanded] = useState(false);
   const [structuredResult, setStructuredResult] = useState<string | null>(null);
   const [structuredError, setStructuredError] = useState<string | null>(null);
-  const [structuredProgress, setStructuredProgress] = useState<string | null>(null);
+  const [structuredProgress, setStructuredProgress] = useState<string | null>(
+    null
+  );
   const [runningStructuredExample, setRunningStructuredExample] = useState<
     'support' | 'complex' | null
   >(null);
@@ -128,26 +133,25 @@ export default function App() {
   };
 
   const engineLabel: Record<typeof engineStatus, string> = {
-    idle:         'Not initialised',
+    idle: 'Not initialised',
     initializing: 'Initialising…',
-    ready:        'Engine ready',
-    generating:   'Generating…',
-    error:        'Error',
+    ready: 'Engine ready',
+    generating: 'Generating…',
+    error: 'Error',
   };
 
   const engineColor: Record<typeof engineStatus, string> = {
-    idle:         '#64748b',
+    idle: '#64748b',
     initializing: '#d97706',
-    ready:        '#15803d',
-    generating:   '#2563eb',
-    error:        '#dc2626',
+    ready: '#15803d',
+    generating: '#2563eb',
+    error: '#dc2626',
   };
 
   const canSend =
     engineStatus === 'ready' && !isStreaming && prompt.trim().length > 0;
 
-  const canInit =
-    engineStatus === 'idle' || engineStatus === 'error';
+  const canInit = engineStatus === 'idle' || engineStatus === 'error';
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -176,7 +180,9 @@ export default function App() {
             { backgroundColor: engineColor[engineStatus] },
           ]}
         />
-        <Text style={[styles.engineLabel, { color: engineColor[engineStatus] }]}>
+        <Text
+          style={[styles.engineLabel, { color: engineColor[engineStatus] }]}
+        >
           {engineLabel[engineStatus]}
         </Text>
       </Pressable>
@@ -194,10 +200,20 @@ export default function App() {
               style={[styles.modeBtn, modelPath === '' && styles.modeBtnActive]}
               onPress={() => setModelPath('')}
             >
-              <Text style={[styles.modeBtnText, modelPath === '' && styles.modeBtnTextActive]}>
+              <Text
+                style={[
+                  styles.modeBtnText,
+                  modelPath === '' && styles.modeBtnTextActive,
+                ]}
+              >
                 ⚡ Native AICore
               </Text>
-              <Text style={[styles.modeBtnSub, modelPath === '' && styles.modeBtnTextActive]}>
+              <Text
+                style={[
+                  styles.modeBtnSub,
+                  modelPath === '' && styles.modeBtnTextActive,
+                ]}
+              >
                 Gemini Nano (Pixel 8+)
               </Text>
             </Pressable>
@@ -205,10 +221,20 @@ export default function App() {
               style={[styles.modeBtn, modelPath !== '' && styles.modeBtnActive]}
               onPress={() => setModelPath('/data/local/tmp/gemini-nano.bin')}
             >
-              <Text style={[styles.modeBtnText, modelPath !== '' && styles.modeBtnTextActive]}>
+              <Text
+                style={[
+                  styles.modeBtnText,
+                  modelPath !== '' && styles.modeBtnTextActive,
+                ]}
+              >
                 📁 Local file
               </Text>
-              <Text style={[styles.modeBtnSub, modelPath !== '' && styles.modeBtnTextActive]}>
+              <Text
+                style={[
+                  styles.modeBtnSub,
+                  modelPath !== '' && styles.modeBtnTextActive,
+                ]}
+              >
                 .bin / MediaPipe
               </Text>
             </Pressable>
@@ -244,7 +270,11 @@ export default function App() {
           {/* Control buttons */}
           <View style={styles.controlRow}>
             <Pressable
-              style={[styles.btn, styles.btnPrimary, !canInit && styles.btnDisabled]}
+              style={[
+                styles.btn,
+                styles.btnPrimary,
+                !canInit && styles.btnDisabled,
+              ]}
               onPress={handleInitialize}
               disabled={!canInit}
             >
@@ -256,7 +286,11 @@ export default function App() {
             </Pressable>
 
             <Pressable
-              style={[styles.btn, styles.btnDanger, engineStatus === 'idle' && styles.btnDisabled]}
+              style={[
+                styles.btn,
+                styles.btnDanger,
+                engineStatus === 'idle' && styles.btnDisabled,
+              ]}
               onPress={handleRelease}
               disabled={engineStatus === 'idle'}
             >
@@ -264,7 +298,11 @@ export default function App() {
             </Pressable>
 
             <Pressable
-              style={[styles.btn, styles.btnSecondary, messages.length === 0 && styles.btnDisabled]}
+              style={[
+                styles.btn,
+                styles.btnSecondary,
+                messages.length === 0 && styles.btnDisabled,
+              ]}
               onPress={clearMessages}
               disabled={messages.length === 0}
             >
@@ -278,11 +316,14 @@ export default function App() {
               style={[
                 styles.btn,
                 styles.btnSecondary,
-                (engineStatus !== 'ready' || runningStructuredExample !== null) &&
+                (engineStatus !== 'ready' ||
+                  runningStructuredExample !== null) &&
                   styles.btnDisabled,
               ]}
               onPress={runStructuredSupportExample}
-              disabled={engineStatus !== 'ready' || runningStructuredExample !== null}
+              disabled={
+                engineStatus !== 'ready' || runningStructuredExample !== null
+              }
             >
               <Text style={styles.btnTextDark}>
                 {runningStructuredExample === 'support'
@@ -295,11 +336,14 @@ export default function App() {
               style={[
                 styles.btn,
                 styles.btnSecondary,
-                (engineStatus !== 'ready' || runningStructuredExample !== null) &&
+                (engineStatus !== 'ready' ||
+                  runningStructuredExample !== null) &&
                   styles.btnDisabled,
               ]}
               onPress={runStructuredComplexExample}
-              disabled={engineStatus !== 'ready' || runningStructuredExample !== null}
+              disabled={
+                engineStatus !== 'ready' || runningStructuredExample !== null
+              }
             >
               <Text style={styles.btnTextDark}>
                 {runningStructuredExample === 'complex'
@@ -311,7 +355,9 @@ export default function App() {
 
           {(structuredResult || structuredError) && (
             <View style={styles.structuredBox}>
-              <Text style={styles.structuredTitle}>Structured output result</Text>
+              <Text style={styles.structuredTitle}>
+                Structured output result
+              </Text>
               {structuredError ? (
                 <Text style={styles.errorText}>{structuredError}</Text>
               ) : (
@@ -320,7 +366,9 @@ export default function App() {
                   nestedScrollEnabled
                 >
                   <ScrollView horizontal nestedScrollEnabled>
-                    <Text style={styles.structuredCode}>{structuredResult}</Text>
+                    <Text style={styles.structuredCode}>
+                      {structuredResult}
+                    </Text>
                   </ScrollView>
                 </ScrollView>
               )}
@@ -335,7 +383,9 @@ export default function App() {
         </ScrollView>
       )}
 
-      {(runningStructuredExample !== null || structuredResult || structuredError) && (
+      {(runningStructuredExample !== null ||
+        structuredResult ||
+        structuredError) && (
         <View style={styles.structuredPreviewBox}>
           <Text style={styles.structuredTitle}>Structured output result</Text>
           {runningStructuredExample !== null ? (
@@ -346,7 +396,9 @@ export default function App() {
                   : 'Generating workout…'}
               </Text>
               {structuredProgress ? (
-                <Text style={styles.structuredProgressText}>{structuredProgress}</Text>
+                <Text style={styles.structuredProgressText}>
+                  {structuredProgress}
+                </Text>
               ) : null}
             </>
           ) : structuredError ? (
@@ -379,8 +431,8 @@ export default function App() {
               {engineStatus === 'idle'
                 ? 'Configure the model path and initialise the engine to start.'
                 : engineStatus === 'ready'
-                ? 'Engine ready. Type a message to begin.'
-                : engineLabel[engineStatus]}
+                  ? 'Engine ready. Type a message to begin.'
+                  : engineLabel[engineStatus]}
             </Text>
           </View>
         ) : (
@@ -406,8 +458,8 @@ export default function App() {
               engineStatus !== 'ready'
                 ? 'Initialise the engine first…'
                 : streamMode
-                ? 'Type a prompt (streaming)…'
-                : 'Type a prompt…'
+                  ? 'Type a prompt (streaming)…'
+                  : 'Type a prompt…'
             }
             placeholderTextColor="#94a3b8"
             multiline
@@ -429,7 +481,12 @@ export default function App() {
         </View>
 
         {/* Active mode indicator */}
-        <View style={[styles.modeBar, { paddingBottom: Math.max(8, insets.bottom) }]}>
+        <View
+          style={[
+            styles.modeBar,
+            { paddingBottom: Math.max(8, insets.bottom) },
+          ]}
+        >
           <Text style={styles.modeText}>
             {streamMode ? '⚡ Streaming enabled' : '📄 Full response'}
             {isStreaming ? '  •  Receiving tokens…' : ''}
@@ -577,7 +634,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   btnPrimary: { backgroundColor: '#6366f1' },
-  btnDanger:  { backgroundColor: '#ef4444' },
+  btnDanger: { backgroundColor: '#ef4444' },
   btnSecondary: {
     backgroundColor: '#fff',
     borderWidth: 1,
@@ -585,7 +642,7 @@ const styles = StyleSheet.create({
   },
   btnDisabled: { opacity: 0.4 },
   btnTextLight: { color: '#fff', fontWeight: '600', fontSize: 13 },
-  btnTextDark:  { color: '#475569', fontWeight: '600', fontSize: 13 },
+  btnTextDark: { color: '#475569', fontWeight: '600', fontSize: 13 },
 
   // Error
   errorBox: {
@@ -715,4 +772,3 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
   },
 });
-
