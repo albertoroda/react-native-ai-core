@@ -91,10 +91,14 @@ jobs:
         run: |
           yarn example expo prebuild --platform android
 
-      - name: Ensure minSdkVersion=26 in gradle.properties
+      - name: Ensure minSdkVersion=26
         if: env.turbo_cache_hit != 1
         run: |
-          sed -i 's/^minSdkVersion=.*/minSdkVersion=26/' example/android/gradle.properties
+          # Patch gradle.properties — delete any existing minSdkVersion line and append the correct value
+          sed -i '/minSdkVersion/d' example/android/gradle.properties
+          echo 'minSdkVersion=26' >> example/android/gradle.properties
+          # Patch app/build.gradle — replace ext property reference with hardcoded value as a safety net
+          sed -i 's/minSdkVersion rootProject\.ext\.minSdkVersion/minSdkVersion 26/' example/android/app/build.gradle
 
       - name: Cache Gradle
         if: env.turbo_cache_hit != 1

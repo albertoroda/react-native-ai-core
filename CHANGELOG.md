@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2026-04-08
+
+### Fixed
+
+- CI `build-android`: `expo prebuild` was regenerating `gradle.properties` with `minSdkVersion=24`; the workflow now forces `minSdkVersion=26` via `sed` immediately after prebuild, preventing the manifest merger failure with `genai-prompt`.
+- `app.json`: added `"minSdkVersion": 26` to the `android` section so future local prebuilds also generate the correct value.
+
+---
+
 ## [0.3.0] - 2026-04-08
 
 ### Added
