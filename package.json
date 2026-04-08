@@ -60,14 +60,14 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/albertofernandezroda/react-native-ai-core.git"
+    "url": "git+https://github.com/albertoroda/react-native-ai-core.git"
   },
-  "author": "Alberto Fernandez <dev@example.com> (https://github.com/albertofernandezroda)",
+  "author": "Alberto Fernandez (https://github.com/albertoroda)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/albertofernandezroda/react-native-ai-core/issues"
+    "url": "https://github.com/albertoroda/react-native-ai-core/issues"
   },
-  "homepage": "https://github.com/albertofernandezroda/react-native-ai-core#readme",
+  "homepage": "https://github.com/albertoroda/react-native-ai-core#readme",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
