@@ -180,7 +180,11 @@ export function useAICore(
           return;
         }
         const msg = e?.message ?? 'Failed to generate response';
-        addMessage({ role: 'assistant', content: `[Error: ${msg}]`, error: true });
+        addMessage({
+          role: 'assistant',
+          content: `[Error: ${msg}]`,
+          error: true,
+        });
         setEngineStatus('ready');
         setErrorMessage(msg);
       }

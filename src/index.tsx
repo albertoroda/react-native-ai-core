@@ -26,7 +26,11 @@ export {
 // ── Public types ────────────────────────────────────────────────────────────────
 
 /** Availability status of Gemini Nano on the device */
-export type AvailabilityStatus = 'AVAILABLE' | 'AVAILABLE_NPU' | 'NEED_DOWNLOAD' | 'UNSUPPORTED';
+export type AvailabilityStatus =
+  | 'AVAILABLE'
+  | 'AVAILABLE_NPU'
+  | 'NEED_DOWNLOAD'
+  | 'UNSUPPORTED';
 
 /** Streaming response callbacks */
 export interface StreamCallbacks {
@@ -49,9 +53,9 @@ export interface AIError {
 }
 
 // ── Event names (must match the Kotlin module constants) ───────────────────────
-const EVENT_STREAM_TOKEN    = 'AICore_streamToken';
+const EVENT_STREAM_TOKEN = 'AICore_streamToken';
 const EVENT_STREAM_COMPLETE = 'AICore_streamComplete';
-const EVENT_STREAM_ERROR    = 'AICore_streamError';
+const EVENT_STREAM_ERROR = 'AICore_streamError';
 
 const emitter =
   NativeAiCore != null ? new NativeEventEmitter(NativeAiCore) : null;
@@ -135,7 +139,7 @@ export function generateResponseStream(
 
   const tokenSub = emitter.addListener(
     EVENT_STREAM_TOKEN,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     (event: any) => {
       callbacks.onToken(
         (event as { token: string; done: boolean }).token,
@@ -150,7 +154,7 @@ export function generateResponseStream(
 
   const errorSub = emitter.addListener(
     EVENT_STREAM_ERROR,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     (error: any) => {
       callbacks.onError(error as AIError);
     }
