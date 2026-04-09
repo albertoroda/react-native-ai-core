@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] - 2026-04-09
+
+### Added
+
+- **`Engine` enum** — type-safe backend selector exported as a `const` object and a union type:
+  ```ts
+  Engine.AICORE     // 'aicore'
+  Engine.LITERTLM   // 'litertlm'
+  Engine.MEDIAPIPE  // 'mediapipe'
+  ```
+
+- **`KnownModel` registry** — a statically typed, curated map of models from the Google AI Edge catalog. All entries include the correct `modelId`, `catalogName` (the directory name used on disk), engine, and approximate size:
+
+  | Key | Catalog name | Size |
+  |---|---|---|
+  | `GEMINI_NANO` | — (native NPU) | — |
+  | `GEMMA4_2B` | `Gemma-4-E2B-it` | ~2.4 GB |
+  | `GEMMA4_4B` | `Gemma-4-E4B-it` | ~3.4 GB |
+  | `GEMMA3N_2B` | `Gemma-3n-E2B-it` | ~3.4 GB |
+  | `GEMMA3N_4B` | `Gemma-3n-E4B-it` | ~4.6 GB |
+  | `GEMMA3_1B` | `Gemma3-1B-IT` | ~0.55 GB |
+  | `QWEN25_1B5` | `Qwen2.5-1.5B-Instruct` | ~1.5 GB |
+  | `DEEPSEEK_R1_1B5` | `DeepSeek-R1-Distill-Qwen-1.5B` | ~1.7 GB |
+
+- **`KnownModelEntry` interface** — added `catalogName?: string` field. This is the exact `name` from the Google AI Edge catalog JSON (and therefore the directory name used by `downloadModel()`). `isModelDownloaded()` now uses this field for an accurate on-disk lookup.
+
+- **`ensureModel(model, opts?): Promise<void>`** — one-call initialization lifecycle: check on-device → download from HuggingFace Hub if missing → initialize engine. Accepts `hfToken`, `onProgress`, `onStatus` (`'checking' | 'downloading' | 'initializing' | 'ready'`), and `catalogVersion` options.
+
+- **`isModelDownloaded(model): Promise<{ downloaded, path? }>`** — now accepts a full `KnownModelEntry` (preferred) or a raw name string. When given an entry it checks both `name` and `catalogName`, fixing false-negative results for catalog-downloaded models.
+
+- **`getInitializedModel(): Promise<{ engine, modelPath } | null>`** — query the currently loaded engine and model path from native. Returns `null` when idle.
+
+- **`setSystemPrompt(prompt): Promise<void>`** — injects a persistent system instruction into every subsequent `generateResponse`, `generateResponseStream`, and `generateResponseStateless` call. Implemented natively in Kotlin:
+  - LiteRT-LM / MediaPipe: prepended as `System: <prompt>\n\n`
+  - Gemma IT models: wrapped in `<start_of_turn>system\n...<end_of_turn>` chat template
+
+- **`clearSystemPrompt(): Promise<void>`** — removes the active system prompt.
+
+- **`getTokenCount(text): Promise<number>`** — estimates the token count for a string. Implemented as `max(0, floor(chars / 3.5))` — a conservative approximation suitable for context-window budget checks.
+
+- **`generateResponseStateless(prompt): Promise<string>`** — previously internal. Now exported as a public API. Runs a one-shot inference that bypasses conversation state, suitable for extraction, classification, and tool-call pipelines.
+
+- **Native tracking fields** (`AiCoreModule.kt`) — `currentEngineName`, `currentModelPath`, and `systemPrompt` now tracked across `initialize()` / `release()` calls to power `getInitializedModel()` and the system prompt injection.
+
+### Fixed
+
+- **`isModelDownloaded()` always returning `false`** — the function was comparing the `KnownModel` display name (e.g. `'Gemma 4 2B'`) against the directory name written by `downloadModel()` (e.g. `'Gemma-4-E2B-it'`). Fixed by introducing `catalogName` and matching against both.
+
+- **`ensureModel()` catalog lookup failing** — was matching by `modelId` which no longer coincides with any entry in catalog `1_0_11.json`. Now uses `catalogName` for an exact match with a `modelId` fallback.
+
+- **`KnownModel` `modelId` fields outdated** — all entries updated to the repository IDs actually present in the current Google AI Edge catalog (`1_0_11.json`). Removed `GEMMA3_4B`, `PHI4_MINI`, `MISTRAL_7B`, `LLAMA3_1B`, `LLAMA3_3B` — these are not in the current catalog. Added `GEMMA4_4B`, `GEMMA3N_2B`, `GEMMA3N_4B`, `QWEN25_1B5`, `DEEPSEEK_R1_1B5`.
+
+### Security
+
+- **Removed `MANAGE_EXTERNAL_STORAGE` permission** from `AndroidManifest.xml`. This dangerous permission was declared but never requested at runtime and caused unnecessary Google Play security flags. All model storage uses `getExternalFilesDir()`, which requires no permission on Android ≥ 10.
+
+---
+
 ## [0.4.0] - 2026-04-09
 
 ### Added

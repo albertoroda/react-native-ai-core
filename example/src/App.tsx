@@ -32,6 +32,7 @@ import AICore, {
   type DownloadedModel,
 } from 'react-native-ai-core';
 import * as SecureStore from 'expo-secure-store';
+import { InitTab } from './components/InitTab';
 
 const HF_TOKEN_KEY = 'hf_token';
 
@@ -53,7 +54,7 @@ const C = {
   dangerDim: '#450a0a',
 };
 
-type Tab = 'chat' | 'models';
+type Tab = 'chat' | 'models' | 'init';
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
@@ -719,17 +720,23 @@ export default function App() {
         keyboardVerticalOffset={0}
       >
         <View style={{ flex: 1 }}>
-          {tab === 'chat' ? renderChatTab() : renderModelsTab()}
+          {tab === 'chat' ? (
+            renderChatTab()
+          ) : tab === 'init' ? (
+            <InitTab hfToken={hfToken} />
+          ) : (
+            renderModelsTab()
+          )}
         </View>
       </KeyboardAvoidingView>
       <View style={[s.tabBar, { paddingBottom: Math.max(8, insets.bottom) }]}>
-        {(['chat', 'models'] as Tab[]).map((t) => (
+        {(['chat', 'models', 'init'] as Tab[]).map((t) => (
           <Pressable key={t} style={s.tabBtn} onPress={() => setTab(t)}>
             <Text style={[s.tabIcon, tab === t && s.tabIconOn]}>
-              {t === 'chat' ? '💬' : '🤖'}
+              {t === 'chat' ? '💬' : t === 'models' ? '🤖' : '⚗️'}
             </Text>
             <Text style={[s.tabLabel, tab === t && s.tabLabelOn]}>
-              {t === 'chat' ? 'Chat' : 'Models'}
+              {t === 'chat' ? 'Chat' : t === 'models' ? 'Models' : 'Init'}
             </Text>
           </Pressable>
         ))}

@@ -7,9 +7,10 @@
     <!-- Needed to download model files from HuggingFace -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Needed to read model files from external storage (e.g. /sdcard/Download) -->
+    <!-- Needed to read model files from arbitrary paths on Android ≤ 12L (API 32).
+         NOT required for models downloaded via downloadModel() — those go to
+         getExternalFilesDir() which is always accessible without permission. -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application>
         <service

@@ -52,6 +52,11 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   @Volatile private var litertlmEngine: Engine? = null
   @Volatile private var litertlmConversation: Conversation? = null
 
+  // ── Engine state tracking ─────────────────────────────────────────────────
+  @Volatile private var currentEngineName: String = ""
+  @Volatile private var currentModelPath: String = ""
+  @Volatile private var systemPrompt: String? = null
+
   private val executor: ExecutorService = Executors.newSingleThreadExecutor()
   private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -99,13 +104,19 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
 
   @Synchronized
   private fun buildContextualPrompt(userPrompt: String): String {
-    return buildPromptWithBudget(userPrompt, null, END_MARKER_INSTRUCTION)
+    val base = buildPromptWithBudget(userPrompt, null, END_MARKER_INSTRUCTION)
+    val sp = systemPrompt ?: return base
+    return "System: $sp\n\n$base"
   }
 
   // Gemma IT chat template: <start_of_turn>user\n…<end_of_turn>\n<start_of_turn>model\n
   @Synchronized
   private fun buildGemmaPrompt(userPrompt: String, useConversationHistory: Boolean): String {
     val sb = StringBuilder()
+    // Inject system prompt as a system turn (supported by Gemma 3+ IT models)
+    systemPrompt?.let { sp ->
+      sb.append("<start_of_turn>system\n").append(sp).append("<end_of_turn>\n")
+    }
     if (useConversationHistory) {
       for ((u, a) in conversationHistory) {
         sb.append("<start_of_turn>user\n").append(u).append("<end_of_turn>\n")
@@ -414,6 +425,8 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
     litertlmConversation = null
     litertlmEngine?.close()
     litertlmEngine = null
+    currentEngineName = ""
+    currentModelPath = ""
     resetHistory()
 
     if (modelPath.isEmpty()) {
@@ -423,6 +436,8 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
           when (model.checkStatus()) {
             FeatureStatus.AVAILABLE -> {
               mlkitModel = model
+              currentEngineName = "aicore"
+              currentModelPath = ""
               promise.resolve(true)
             }
             FeatureStatus.DOWNLOADABLE -> {
@@ -430,6 +445,8 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
                 when (ds) {
                   DownloadStatus.DownloadCompleted -> {
                     mlkitModel = model
+                    currentEngineName = "aicore"
+                    currentModelPath = ""
                     promise.resolve(true)
                   }
                   is DownloadStatus.DownloadFailed -> promise.reject("DOWNLOAD_FAILED", ds.e.message, ds.e)
@@ -482,6 +499,8 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
             litertlmConversation = engine.createConversation(
               ConversationConfig(samplerConfig = samplerConfig)
             )
+            currentEngineName = "litertlm"
+            currentModelPath = resolvedPath
           } else {
             val options = LlmInference.LlmInferenceOptions.builder()
               .setModelPath(resolvedPath)
@@ -489,6 +508,8 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
               .setPreferredBackend(LlmInference.Backend.DEFAULT)
               .build()
             llmInference = LlmInference.createFromOptions(reactApplicationContext, options)
+            currentEngineName = "mediapipe"
+            currentModelPath = resolvedPath
           }
           promise.resolve(true)
         } catch (e: UnsupportedOperationException) {
@@ -782,9 +803,14 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
               latch.countDown()
             }
           })
-          latch.await()
+          val streamCompleted = latch.await(INFERENCE_TIMEOUT_SEC, TimeUnit.SECONDS)
           session?.close()
           session = null
+          if (!streamCompleted) {
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_ERROR, createErrorMap("TIMEOUT", "MediaPipe stream timed out after ${INFERENCE_TIMEOUT_SEC}s"))
+            return@execute
+          }
           if (!cancelRequested) saveToHistory(prompt, total.toString().trim())
           emitStreamToken("", true)
           stopInferenceService()
@@ -890,6 +916,8 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
         litertlmConversation = null
         litertlmEngine?.close()
         litertlmEngine = null
+        currentEngineName = ""
+        currentModelPath = ""
         resetHistory()
         promise.resolve(null)
       } catch (e: Exception) {
@@ -1059,11 +1087,44 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  override fun setSystemPrompt(prompt: String, promise: Promise) {
+    systemPrompt = prompt.trim().ifEmpty { null }
+    promise.resolve(null)
+  }
+
+  override fun clearSystemPrompt(promise: Promise) {
+    systemPrompt = null
+    promise.resolve(null)
+  }
+
+  override fun getTokenCount(text: String, promise: Promise) {
+    // Gemma tokenizer: ~3.5 characters per token for English/code
+    val estimated = (text.length / 3.5).toInt().coerceAtLeast(0)
+    promise.resolve(estimated)
+  }
+
+  override fun getInitializedModel(promise: Promise) {
+    val engine = currentEngineName
+    if (engine.isEmpty()) {
+      promise.resolve("")
+      return
+    }
+    val safePath = currentModelPath
+      .replace("\\", "\\\\")
+      .replace("\"", "\\\"")
+    promise.resolve("{\"engine\":\"$engine\",\"modelPath\":\"$safePath\"}")
+  }
+
   override fun addListener(eventName: String) {}
   override fun removeListeners(count: Double) {}
 
   override fun invalidate() {
     super.invalidate()
+    // Signal running tasks to stop before we tear down resources.
+    cancelRequested = true
+    downloadCancelRequested = true
+    activeDownloadCall?.cancel()
+    activeGenerationJob?.cancel()
     try {
       stopInferenceService()
       llmInference?.close()
@@ -1074,8 +1135,10 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
       litertlmEngine?.close()
       litertlmEngine = null
     } finally {
-      executor.shutdown()
-      downloadExecutor.shutdown()
+      // shutdownNow() interrupts executor threads that are blocked on latch.await(),
+      // preventing the bridge teardown from hanging for up to INFERENCE_TIMEOUT_SEC.
+      executor.shutdownNow()
+      downloadExecutor.shutdownNow()
       coroutineScope.cancel()
     }
   }
