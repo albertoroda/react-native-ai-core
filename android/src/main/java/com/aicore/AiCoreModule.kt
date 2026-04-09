@@ -25,16 +25,32 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.MessageCallback
+import com.google.ai.edge.litertlm.SamplerConfig
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class AiCoreModule(reactContext: ReactApplicationContext) :
   NativeAiCoreSpec(reactContext) {
 
   @Volatile private var mlkitModel: GenerativeModel? = null
   @Volatile private var llmInference: LlmInference? = null
+  @Volatile private var litertlmEngine: Engine? = null
+  @Volatile private var litertlmConversation: Conversation? = null
 
   private val executor: ExecutorService = Executors.newSingleThreadExecutor()
   private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -43,16 +59,24 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   @Volatile private var cancelRequested = false
   @Volatile private var activeGenerationJob: Job? = null
 
+  // ── Download state ────────────────────────────────────────────────────────
+  @Volatile private var downloadCancelRequested = false
+  @Volatile private var activeDownloadCall: okhttp3.Call? = null
+  private val downloadExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
   companion object {
     const val NAME = NativeAiCoreSpec.NAME
     const val EVENT_STREAM_TOKEN    = "AICore_streamToken"
     const val EVENT_STREAM_COMPLETE = "AICore_streamComplete"
     const val EVENT_STREAM_ERROR    = "AICore_streamError"
+    const val EVENT_DOWNLOAD_PROGRESS = "AICore_downloadProgress"
     private const val DEFAULT_TEMPERATURE      = 0.7f
     private const val DEFAULT_MAX_TOKENS        = 4096  // MediaPipe context window (input+output)
+    private const val LITERTLM_MAX_TOKENS       = 4096  // LiteRT-LM: context window (input+output)
+    private const val INFERENCE_TIMEOUT_SEC     = 180L  // 3 min max per inference (prevents ANR if onDone() never fires)
     private const val REQUESTED_MAX_OUTPUT_TOKENS = 256
     private const val FALLBACK_MAX_OUTPUT_TOKENS = 256
-    private const val DEFAULT_TOP_K             = 40
+    private const val DEFAULT_TOP_K             = 64
     private const val PROMPT_CHAR_BUDGET        = 4000
     private const val HISTORY_MAX_CHARS         = 9000
     private const val MAX_CONTINUATIONS         = 12
@@ -76,6 +100,21 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   @Synchronized
   private fun buildContextualPrompt(userPrompt: String): String {
     return buildPromptWithBudget(userPrompt, null, END_MARKER_INSTRUCTION)
+  }
+
+  // Gemma IT chat template: <start_of_turn>user\n…<end_of_turn>\n<start_of_turn>model\n
+  @Synchronized
+  private fun buildGemmaPrompt(userPrompt: String, useConversationHistory: Boolean): String {
+    val sb = StringBuilder()
+    if (useConversationHistory) {
+      for ((u, a) in conversationHistory) {
+        sb.append("<start_of_turn>user\n").append(u).append("<end_of_turn>\n")
+        sb.append("<start_of_turn>model\n").append(a).append("<end_of_turn>\n")
+      }
+    }
+    sb.append("<start_of_turn>user\n").append(userPrompt).append("<end_of_turn>\n")
+    sb.append("<start_of_turn>model\n")
+    return sb.toString()
   }
 
   @Synchronized
@@ -366,10 +405,15 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  @OptIn(ExperimentalApi::class)
   override fun initialize(modelPath: String, promise: Promise) {
     mlkitModel = null
     llmInference?.close()
     llmInference = null
+    litertlmConversation?.close()
+    litertlmConversation = null
+    litertlmEngine?.close()
+    litertlmEngine = null
     resetHistory()
 
     if (modelPath.isEmpty()) {
@@ -404,16 +448,48 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
     } else {
       executor.execute {
         try {
-          if (!File(modelPath).exists()) {
-            promise.reject("MODEL_NOT_FOUND", "Model file not found at: $modelPath")
+          val resolvedPath = if (modelPath.startsWith("~/")) {
+            val extDir = reactApplicationContext.getExternalFilesDir(null)?.absolutePath ?: ""
+            extDir + "/" + modelPath.removePrefix("~/")
+          } else {
+            modelPath
+          }
+          val modelFile = File(resolvedPath)
+          android.util.Log.d("AiCore", "Checking model at: $resolvedPath (exists=${modelFile.exists()})")
+          if (!modelFile.exists()) {
+            promise.reject("MODEL_NOT_FOUND", "Model file not found at: $resolvedPath")
             return@execute
           }
-          val options = LlmInference.LlmInferenceOptions.builder()
-            .setModelPath(modelPath)
-            .setMaxTokens(DEFAULT_MAX_TOKENS)
-            .setPreferredBackend(LlmInference.Backend.DEFAULT)
-            .build()
-          llmInference = LlmInference.createFromOptions(reactApplicationContext, options)
+          if (resolvedPath.endsWith(".litertlm")) {
+            // Use CPU backend directly. GPU (OpenCL) is not available on Tensor G4
+            // and initialize() does NOT throw — the OpenCL error only surfaces on
+            // the first inference call, making GPU→CPU fallback at init impossible.
+            val samplerConfig = SamplerConfig(
+              topK = DEFAULT_TOP_K,
+              topP = 0.95,
+              temperature = DEFAULT_TEMPERATURE.toDouble(),
+            )
+            val cfg = EngineConfig(
+              modelPath = resolvedPath,
+              backend = Backend.CPU(),
+              maxNumTokens = LITERTLM_MAX_TOKENS,
+              cacheDir = reactApplicationContext.getExternalFilesDir(null)?.absolutePath,
+            )
+            val engine = Engine(cfg)
+            engine.initialize()
+            android.util.Log.d("AiCore", "LiteRT-LM: CPU backend OK ✓")
+            litertlmEngine = engine
+            litertlmConversation = engine.createConversation(
+              ConversationConfig(samplerConfig = samplerConfig)
+            )
+          } else {
+            val options = LlmInference.LlmInferenceOptions.builder()
+              .setModelPath(resolvedPath)
+              .setMaxTokens(DEFAULT_MAX_TOKENS)
+              .setPreferredBackend(LlmInference.Backend.DEFAULT)
+              .build()
+            llmInference = LlmInference.createFromOptions(reactApplicationContext, options)
+          }
           promise.resolve(true)
         } catch (e: UnsupportedOperationException) {
           promise.reject("NPU_UNSUPPORTED", e.message, e)
@@ -441,6 +517,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   ) {
     val mlkit = mlkitModel
     val mediapipe = llmInference
+    val litertlm = litertlmConversation
     startInferenceService()
     cancelRequested = false
     when {
@@ -516,49 +593,14 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
       mediapipe != null -> executor.execute {
         var session: LlmInferenceSession? = null
         try {
-          val rawTotal = StringBuilder()
-          val visibleTotal = StringBuilder()
-          var currentPrompt = buildPrompt(prompt, useConversationHistory)
-          var continuations = 0
-          var continuationJoinPending = false
-          while (true) {
-            if (cancelRequested) {
-              stopInferenceService()
-              promise.reject("CANCELLED", "Generation cancelled.")
-              return@execute
-            }
-            session = createMediaPipeSession()
-            session.addQueryChunk(currentPrompt)
-            val part = session.generateResponse()
-            session.close()
-            session = null
-            rawTotal.append(part)
-            if (containsEndMarker(rawTotal.toString())) break
-
-            val cleanPart = sanitizeVisibleText(stripEndMarker(part))
-            val partForUi = if (continuationJoinPending) {
-              continuationJoinPending = false
-              adjustChunkBoundary(visibleTotal.toString(), cleanPart)
-            } else {
-              cleanPart
-            }
-            visibleTotal.append(partForUi)
-            val visible = visibleTotal.toString()
-            if (
-              useConversationHistory &&
-              shouldContinueResponse(visible) &&
-              continuations < MAX_CONTINUATIONS
-            ) {
-              currentPrompt = buildContinuationPrompt(prompt, visible)
-              continuations++
-              continuationJoinPending = true
-            } else break
-          }
-          val full = if (visibleTotal.isNotEmpty()) {
-            sanitizeVisibleText(visibleTotal.toString())
-          } else {
-            sanitizeVisibleText(stripEndMarker(rawTotal.toString()))
-          }
+          val gemmaPrompt = buildGemmaPrompt(prompt, useConversationHistory)
+          session = createMediaPipeSession()
+          session.addQueryChunk(gemmaPrompt)
+          val raw = session.generateResponse()
+          session.close()
+          session = null
+          // Strip any trailing <end_of_turn> token Gemma may append
+          val full = raw.replace("<end_of_turn>", "").trim()
           maybeSaveToHistory(prompt, full, useConversationHistory)
           stopInferenceService()
           promise.resolve(full)
@@ -569,6 +611,56 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
           session?.close()
         }
       }
+      litertlm != null -> executor.execute {
+        val resultBuilder = StringBuilder()
+        var errorThrowable: Throwable? = null
+        val latch = CountDownLatch(1)
+        litertlm.sendMessageAsync(
+          Contents.of(listOf(Content.Text(prompt))),
+          object : MessageCallback {
+            override fun onMessage(message: Message) {
+              if (!cancelRequested) {
+                val text = message.contents.contents
+                  .filterIsInstance<Content.Text>()
+                  .joinToString("") { it.text }
+                resultBuilder.append(text)
+              }
+            }
+            override fun onDone() { latch.countDown() }
+            override fun onError(throwable: Throwable) {
+              errorThrowable = throwable
+              latch.countDown()
+            }
+          },
+          emptyMap(),
+        )
+        val completed = latch.await(INFERENCE_TIMEOUT_SEC, TimeUnit.SECONDS)
+        val err = errorThrowable
+        when {
+          cancelRequested -> {
+            stopInferenceService()
+            promise.reject("CANCELLED", "Generation cancelled.")
+          }
+          !completed -> {
+            stopInferenceService()
+            promise.reject("GENERATION_ERROR", "Inference timed out after ${INFERENCE_TIMEOUT_SEC}s")
+          }
+          err != null -> {
+            if (err.message?.contains("context", ignoreCase = true) == true ||
+                err.message?.contains("token", ignoreCase = true) == true ||
+                err.message?.contains("exceed", ignoreCase = true) == true) {
+              tryResetLitertlmConversation()
+            }
+            stopInferenceService()
+            promise.reject("GENERATION_ERROR", err.message, err)
+          }
+          else -> {
+            val full = resultBuilder.toString().trim()
+            stopInferenceService()
+            promise.resolve(full)
+          }
+        }
+      }
       else -> promise.reject("NOT_INITIALIZED", "LLM not initialized.")
     }
   }
@@ -576,6 +668,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   override fun generateResponseStream(prompt: String) {
     val mlkit = mlkitModel
     val mediapipe = llmInference
+    val litertlm = litertlmConversation
     startInferenceService()
     cancelRequested = false
     when {
@@ -669,64 +762,30 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
       }.also { activeGenerationJob = it }
       mediapipe != null -> executor.execute {
         val total = StringBuilder()
-        val rawTotal = StringBuilder()
-        var currentPrompt = buildContextualPrompt(prompt)
-        var continuations = 0
-        var continuationJoinPending = false
-        var firstDeltaInPass = false
         var session: LlmInferenceSession? = null
-        var markerReached = false
         try {
-          while (true) {
-            if (cancelRequested) break
-            val latch = CountDownLatch(1)
-            firstDeltaInPass = true
-            session = createMediaPipeSession()
-            val capturedSession = session
-            session.addQueryChunk(currentPrompt)
-            session.generateResponseAsync(ProgressListener<String> { partial, done ->
-              if (cancelRequested) {
-                capturedSession.close()
-                latch.countDown()
-                return@ProgressListener
-              }
-              val token = partial ?: ""
-              rawTotal.append(token)
-              if (containsEndMarker(rawTotal.toString())) {
-                markerReached = true
-              }
-
-              val visibleNow = sanitizeVisibleText(stripEndMarker(rawTotal.toString()))
-              if (visibleNow.length > total.length) {
-                val delta = visibleNow.substring(total.length)
-                val adjustedDelta = if (continuationJoinPending && firstDeltaInPass) {
-                  continuationJoinPending = false
-                  firstDeltaInPass = false
-                  adjustChunkBoundary(total.toString(), delta)
-                } else {
-                  firstDeltaInPass = false
-                  delta
-                }
-                if (adjustedDelta.isNotEmpty()) {
-                  total.append(adjustedDelta)
-                  emitStreamToken(adjustedDelta, false)
-                }
-              }
-              if (done) {
-                capturedSession.close()
-                latch.countDown()
-              }
-            })
-            latch.await()
-            session = null
-            if (markerReached) break
-            if (shouldContinueResponse(total.toString()) && continuations < MAX_CONTINUATIONS) {
-              currentPrompt = buildContinuationPrompt(prompt, total.toString())
-              continuations++
-              continuationJoinPending = true
-            } else break
-          }
-          if (!cancelRequested) saveToHistory(prompt, sanitizeVisibleText(total.toString()))
+          val gemmaPrompt = buildGemmaPrompt(prompt, true)
+          val latch = CountDownLatch(1)
+          session = createMediaPipeSession()
+          session.addQueryChunk(gemmaPrompt)
+          session.generateResponseAsync(ProgressListener<String> { partial, done ->
+            if (cancelRequested) {
+              latch.countDown()
+              return@ProgressListener
+            }
+            val token = (partial ?: "").replace("<end_of_turn>", "")
+            if (token.isNotEmpty()) {
+              total.append(token)
+              emitStreamToken(token, false)
+            }
+            if (done) {
+              latch.countDown()
+            }
+          })
+          latch.await()
+          session?.close()
+          session = null
+          if (!cancelRequested) saveToHistory(prompt, total.toString().trim())
           emitStreamToken("", true)
           stopInferenceService()
           sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
@@ -742,6 +801,55 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
           }
         }
       }
+      litertlm != null -> executor.execute {
+        val total = StringBuilder()
+        val latch = CountDownLatch(1)
+        var errorMsg: String? = null
+        litertlm.sendMessageAsync(
+          Contents.of(listOf(Content.Text(prompt))),
+          object : MessageCallback {
+            override fun onMessage(message: Message) {
+              if (!cancelRequested) {
+                val token = message.contents.contents
+                  .filterIsInstance<Content.Text>()
+                  .joinToString("") { it.text }
+                if (token.isNotEmpty()) {
+                  total.append(token)
+                  emitStreamToken(token, false)
+                }
+              }
+            }
+            override fun onDone() { latch.countDown() }
+            override fun onError(throwable: Throwable) {
+              errorMsg = throwable.message
+              latch.countDown()
+            }
+          },
+          emptyMap(),
+        )
+        val streamCompleted = latch.await(INFERENCE_TIMEOUT_SEC, TimeUnit.SECONDS)
+        if (cancelRequested) {
+          emitStreamToken("", true)
+          stopInferenceService()
+          sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
+        } else if (!streamCompleted) {
+          stopInferenceService()
+          sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", "Inference timed out after ${INFERENCE_TIMEOUT_SEC}s"))
+        } else if (errorMsg != null) {
+          // If context window is full, silently reset conversation and report error
+          if (errorMsg!!.contains("context", ignoreCase = true) ||
+              errorMsg!!.contains("token", ignoreCase = true) ||
+              errorMsg!!.contains("exceed", ignoreCase = true)) {
+            tryResetLitertlmConversation()
+          }
+          stopInferenceService()
+          sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", errorMsg ?: "Error"))
+        } else {
+          emitStreamToken("", true)
+          stopInferenceService()
+          sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
+        }
+      }
       else -> sendEvent(EVENT_STREAM_ERROR, createErrorMap("NOT_INITIALIZED", "LLM not initialized."))
     }
   }
@@ -755,6 +863,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
         }
         if (mlkitModel != null) { promise.resolve("AVAILABLE_NPU"); return@launch }
         if (llmInference != null) { promise.resolve("AVAILABLE"); return@launch }
+        if (litertlmConversation != null) { promise.resolve("AVAILABLE"); return@launch }
         when (Generation.getClient().checkStatus()) {
           FeatureStatus.AVAILABLE -> promise.resolve("AVAILABLE_NPU")
           FeatureStatus.DOWNLOADABLE, FeatureStatus.DOWNLOADING -> promise.resolve("NEED_DOWNLOAD")
@@ -777,6 +886,10 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
         mlkitModel = null
         llmInference?.close()
         llmInference = null
+        litertlmConversation?.close()
+        litertlmConversation = null
+        litertlmEngine?.close()
+        litertlmEngine = null
         resetHistory()
         promise.resolve(null)
       } catch (e: Exception) {
@@ -785,15 +898,165 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  @OptIn(ExperimentalApi::class)
   override fun resetConversation(promise: Promise) {
     resetHistory()
+    val engine = litertlmEngine
+    if (engine != null) {
+      try {
+        litertlmConversation?.close()
+        litertlmConversation = engine.createConversation(
+          ConversationConfig(
+            samplerConfig = SamplerConfig(
+              topK = DEFAULT_TOP_K,
+              topP = 0.95,
+              temperature = DEFAULT_TEMPERATURE.toDouble(),
+            )
+          )
+        )
+      } catch (_: Exception) {}
+    }
     promise.resolve(null)
+  }
+
+  @OptIn(ExperimentalApi::class)
+  private fun tryResetLitertlmConversation() {
+    val engine = litertlmEngine ?: return
+    try {
+      litertlmConversation?.close()
+      litertlmConversation = engine.createConversation(
+        ConversationConfig(
+          samplerConfig = SamplerConfig(topK = DEFAULT_TOP_K, topP = 0.95, temperature = DEFAULT_TEMPERATURE.toDouble())
+        )
+      )
+      resetHistory()
+      android.util.Log.w("AiCore", "LiteRT-LM: conversation reset (context window full)")
+    } catch (e: Exception) {
+      android.util.Log.e("AiCore", "LiteRT-LM: failed to reset conversation: ${e.message}")
+    }
   }
 
   override fun cancelGeneration(promise: Promise) {
     cancelRequested = true
     activeGenerationJob?.cancel()
+    litertlmConversation?.cancelProcess()
     promise.resolve(null)
+  }
+
+  override fun downloadModel(
+    url: String,
+    name: String,
+    commitHash: String,
+    fileName: String,
+    totalBytes: Double,
+    hfToken: String,
+    promise: Promise
+  ) {
+    downloadExecutor.execute {
+      downloadCancelRequested = false
+      val destDir = File(reactApplicationContext.getExternalFilesDir(null), "ai-core-models${File.separator}$name${File.separator}$commitHash")
+      destDir.mkdirs()
+      val destFile = File(destDir, fileName)
+      val tmpFile  = File(destDir, "$fileName.tmp")
+
+      try {
+        val client = OkHttpClient.Builder()
+          .connectTimeout(30, TimeUnit.SECONDS)
+          .readTimeout(0,  TimeUnit.SECONDS)
+          .build()
+        val request = Request.Builder()
+          .url(url)
+          .apply { if (hfToken.isNotBlank()) header("Authorization", "Bearer $hfToken") }
+          .build()
+        val call = client.newCall(request)
+        activeDownloadCall = call
+
+        call.execute().use { response ->
+          if (!response.isSuccessful) {
+            promise.reject("DOWNLOAD_FAILED", "HTTP ${response.code}")
+            return@execute
+          }
+          val body = response.body ?: run {
+            promise.reject("DOWNLOAD_FAILED", "Empty response body")
+            return@execute
+          }
+          val total = if (totalBytes > 0) totalBytes.toLong() else body.contentLength()
+          var received = 0L
+          val startTime = System.currentTimeMillis()
+          var lastEmitMs = 0L
+          val bufSize = 128 * 1024
+          val buf = ByteArray(bufSize)
+
+          tmpFile.outputStream().buffered(bufSize).use { sink ->
+            val source = body.source()
+            while (!downloadCancelRequested) {
+              val n = source.read(buf)
+              if (n == -1) break
+              sink.write(buf, 0, n)
+              received += n
+              val now = System.currentTimeMillis()
+              if (now - lastEmitMs >= 300) {
+                val elapsed = (now - startTime).coerceAtLeast(1)
+                val rate    = received * 1000L / elapsed
+                val remaining = if (rate > 0 && total > 0) (total - received) * 1000L / rate else 0L
+                sendEvent(EVENT_DOWNLOAD_PROGRESS, Arguments.createMap().apply {
+                  putDouble("receivedBytes",  received.toDouble())
+                  putDouble("totalBytes",     total.toDouble())
+                  putDouble("bytesPerSecond", rate.toDouble())
+                  putDouble("remainingMs",    remaining.toDouble())
+                })
+                lastEmitMs = now
+              }
+            }
+          }
+
+          if (downloadCancelRequested) {
+            tmpFile.delete()
+            promise.reject("CANCELLED", "Download cancelled.")
+            return@execute
+          }
+
+          tmpFile.renameTo(destFile)
+          promise.resolve(destFile.absolutePath)
+        }
+      } catch (e: Exception) {
+        tmpFile.delete()
+        promise.reject("DOWNLOAD_ERROR", e.message, e)
+      }
+    }
+  }
+
+  override fun cancelDownload(promise: Promise) {
+    downloadCancelRequested = true
+    activeDownloadCall?.cancel()
+    promise.resolve(null)
+  }
+
+  override fun getDownloadedModels(promise: Promise) {
+    downloadExecutor.execute {
+      try {
+        val baseDir = File(reactApplicationContext.getExternalFilesDir(null), "ai-core-models")
+        val array = Arguments.createArray()
+        if (baseDir.exists()) {
+          baseDir.listFiles()?.forEach { nameDir ->
+            nameDir.listFiles()?.forEach { hashDir ->
+              hashDir.listFiles()?.filter { it.isFile && !it.name.endsWith(".tmp") }?.forEach { file ->
+                array.pushMap(Arguments.createMap().apply {
+                  putString("name",        nameDir.name)
+                  putString("commitHash",  hashDir.name)
+                  putString("fileName",    file.name)
+                  putString("path",        file.absolutePath)
+                  putDouble("sizeInBytes", file.length().toDouble())
+                })
+              }
+            }
+          }
+        }
+        promise.resolve(array)
+      } catch (e: Exception) {
+        promise.reject("ERROR", e.message, e)
+      }
+    }
   }
 
   override fun addListener(eventName: String) {}
@@ -806,8 +1069,13 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
       llmInference?.close()
       llmInference = null
       mlkitModel = null
+      litertlmConversation?.close()
+      litertlmConversation = null
+      litertlmEngine?.close()
+      litertlmEngine = null
     } finally {
       executor.shutdown()
+      downloadExecutor.shutdown()
       coroutineScope.cancel()
     }
   }
