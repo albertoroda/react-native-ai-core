@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.1] - 2026-04-09
+
+### Changed
+
+- **`fetchModelCatalog()` — bundled locally, no network required** — the model catalog is now read from `model_allowlists/*.json` files shipped inside the package, instead of fetching from `raw.githubusercontent.com` at runtime. Eliminates failures caused by GitHub being unavailable, CDN throttling, or the upstream repo being moved/deleted. The public API signature (`fetchModelCatalog(version?)`) is unchanged; the function now resolves synchronously from the bundled data (still returns a `Promise` for API compatibility). Available versions: `'1_0_4'` – `'1_0_11'`, `'ios_1_0_0'`.
+
+---
+
 ## [0.5.0] - 2026-04-09
 
 ### Added

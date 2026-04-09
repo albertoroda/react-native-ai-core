@@ -533,8 +533,19 @@ export async function generateResponseStateless(
 
 // ── Model download API ────────────────────────────────────────────────────────
 
-const ALLOWLIST_BASE_URL =
-  'https://raw.githubusercontent.com/google-ai-edge/gallery/main/model_allowlists';
+// Catalog versions bundled locally — no network required.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const CATALOG_MAP: Record<string, { models?: ModelCatalogEntry[] }> = {
+  '1_0_4':     require('../model_allowlists/1_0_4.json'),
+  '1_0_5':     require('../model_allowlists/1_0_5.json'),
+  '1_0_6':     require('../model_allowlists/1_0_6.json'),
+  '1_0_7':     require('../model_allowlists/1_0_7.json'),
+  '1_0_8':     require('../model_allowlists/1_0_8.json'),
+  '1_0_9':     require('../model_allowlists/1_0_9.json'),
+  '1_0_10':    require('../model_allowlists/1_0_10.json'),
+  '1_0_11':    require('../model_allowlists/1_0_11.json'),
+  'ios_1_0_0': require('../model_allowlists/ios_1_0_0.json'),
+};
 
 /** An entry from the Google AI Edge model catalog. */
 export interface ModelCatalogEntry {
@@ -565,20 +576,27 @@ export type DownloadProgressCallback = (progress: {
 }) => void;
 
 /**
- * Fetches the list of available LLM models from the Google AI Edge gallery.
+ * Returns the list of available LLM models from the locally bundled catalog.
  *
- * @param version  Allowlist version, e.g. `'1_0_11'`. Defaults to `'1_0_11'`.
+ * No network request is made. The catalog files from `model_allowlists/` are
+ * bundled with the library at build time by Metro.
+ *
+ * @param version  Allowlist version to use, e.g. `'1_0_11'`. Defaults to `'1_0_11'`.
+ *                 Available versions: `'1_0_4'` – `'1_0_11'`, `'ios_1_0_0'`.
  */
-export async function fetchModelCatalog(
+export function fetchModelCatalog(
   version = '1_0_11'
 ): Promise<ModelCatalogEntry[]> {
-  const url = `${ALLOWLIST_BASE_URL}/${version}.json`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch model catalog: HTTP ${response.status}`);
+  const catalog = CATALOG_MAP[version];
+  if (!catalog) {
+    const available = Object.keys(CATALOG_MAP).join(', ');
+    return Promise.reject(
+      new Error(`Unknown catalog version '${version}'. Available: ${available}`)
+    );
   }
-  const json = (await response.json()) as { models?: ModelCatalogEntry[] };
-  return (json.models ?? []).filter((m) => m.commitHash && m.modelFile);
+  return Promise.resolve(
+    (catalog.models ?? []).filter((m) => m.commitHash && m.modelFile)
+  );
 }
 
 /**
