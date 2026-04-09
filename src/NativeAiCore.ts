@@ -82,6 +82,30 @@ export interface Spec extends TurboModule {
    */
   getDownloadedModels(): Promise<string>;
 
+  /**
+   * Sets a persistent system prompt that is prepended to every subsequent
+   * generation (chat and stateless). Replaces any previously set prompt.
+   */
+  setSystemPrompt(prompt: string): Promise<void>;
+
+  /**
+   * Clears any previously set system prompt.
+   */
+  clearSystemPrompt(): Promise<void>;
+
+  /**
+   * Returns an approximate token count for the given text using the
+   * active model's tokenization ratio (~3.5 chars/token for Gemma).
+   */
+  getTokenCount(text: string): Promise<number>;
+
+  /**
+   * Returns a JSON string describing the currently initialised engine and
+   * model path, or an empty string if no model is loaded.
+   * Shape: '{"engine":"litertlm","modelPath":"/absolute/path/model.litertlm"}'
+   */
+  getInitializedModel(): Promise<string>;
+
   // Required by NativeEventEmitter
   addListener(eventName: string): void;
   removeListeners(count: number): void;

@@ -1,6 +1,6 @@
 {
   "name": "react-native-ai-core",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "On-device LLM inference for React Native — Gemma 4, Gemma 3, Phi-4, Mistral, Llama 3 and more via Google AI Edge LiteRT-LM, ML Kit AICore and MediaPipe",
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
@@ -47,6 +47,11 @@
     "gemini",
     "gemini-nano",
     "on-device",
+    "gemma-4",
+    "gemma-3",
+    "phi-4",
+    "gemma-2",
+    "mistral",
     "npu",
     "mediapipe",
     "ml-kit",
@@ -62,7 +67,7 @@
     "type": "git",
     "url": "git+https://github.com/albertoroda/react-native-ai-core.git"
   },
-  "author": "Alberto Fernandez (https://github.com/albertoroda)",
+  "author": "Alberto Roda Dev (https://github.com/albertoroda)",
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/albertoroda/react-native-ai-core/issues"
