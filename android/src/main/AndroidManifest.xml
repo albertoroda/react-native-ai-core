@@ -4,6 +4,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <!-- Needed to download model files from HuggingFace -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Needed to read model files from external storage (e.g. /sdcard/Download) -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
     <application>
         <service
             android:name=".InferenceService"

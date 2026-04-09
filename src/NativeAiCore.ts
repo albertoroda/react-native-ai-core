@@ -58,6 +58,30 @@ export interface Spec extends TurboModule {
    */
   cancelGeneration(): Promise<void>;
 
+  /**
+   * Downloads a model file from HuggingFace.
+   * Progress events are emitted as 'AICore_downloadProgress'.
+   * Returns the absolute path where the file was saved.
+   */
+  downloadModel(
+    url: string,
+    name: string,
+    commitHash: string,
+    fileName: string,
+    totalBytes: number,
+    hfToken: string
+  ): Promise<string>;
+
+  /**
+   * Cancels a download currently in progress.
+   */
+  cancelDownload(): Promise<void>;
+
+  /**
+   * Returns a JSON-encoded array of previously downloaded models.
+   */
+  getDownloadedModels(): Promise<string>;
+
   // Required by NativeEventEmitter
   addListener(eventName: string): void;
   removeListeners(count: number): void;

@@ -56,6 +56,7 @@ export interface AIError {
 const EVENT_STREAM_TOKEN = 'AICore_streamToken';
 const EVENT_STREAM_COMPLETE = 'AICore_streamComplete';
 const EVENT_STREAM_ERROR = 'AICore_streamError';
+const EVENT_DOWNLOAD_PROGRESS = 'AICore_downloadProgress';
 
 const emitter =
   NativeAiCore != null ? new NativeEventEmitter(NativeAiCore) : null;
@@ -228,6 +229,120 @@ export async function cancelGeneration(): Promise<void> {
   return NativeAiCore.cancelGeneration();
 }
 
+// ── Model download API ────────────────────────────────────────────────────────
+
+const ALLOWLIST_BASE_URL =
+  'https://raw.githubusercontent.com/google-ai-edge/gallery/main/model_allowlists';
+
+/** An entry from the Google AI Edge model catalog. */
+export interface ModelCatalogEntry {
+  name: string;
+  modelId: string;
+  modelFile: string;
+  commitHash: string;
+  sizeInBytes: number;
+  description?: string;
+  minDeviceMemoryInGb?: number;
+}
+
+/** A model that has already been downloaded to the device. */
+export interface DownloadedModel {
+  name: string;
+  commitHash: string;
+  fileName: string;
+  path: string;
+  sizeInBytes: number;
+}
+
+/** Progress callback for `downloadModel`. */
+export type DownloadProgressCallback = (progress: {
+  receivedBytes: number;
+  totalBytes: number;
+  bytesPerSecond: number;
+  remainingMs: number;
+}) => void;
+
+/**
+ * Fetches the list of available LLM models from the Google AI Edge gallery.
+ *
+ * @param version  Allowlist version, e.g. `'1_0_11'`. Defaults to `'1_0_11'`.
+ */
+export async function fetchModelCatalog(
+  version = '1_0_11'
+): Promise<ModelCatalogEntry[]> {
+  const url = `${ALLOWLIST_BASE_URL}/${version}.json`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch model catalog: HTTP ${response.status}`);
+  }
+  const json = (await response.json()) as { models?: ModelCatalogEntry[] };
+  return (json.models ?? []).filter((m) => m.commitHash && m.modelFile);
+}
+
+/**
+ * Downloads a model to the device's external files directory.
+ *
+ * The file is saved under:
+ * `<ExternalFilesDir>/ai-core-models/<name>/<commitHash>/<fileName>`
+ *
+ * Pass the returned path directly to `initialize()`.
+ *
+ * @param entry       A `ModelCatalogEntry` from `fetchModelCatalog()`.
+ * @param onProgress  Optional callback receiving download progress.
+ * @returns           Absolute path to the downloaded model file.
+ */
+export function downloadModel(
+  entry: ModelCatalogEntry,
+  hfToken?: string,
+  onProgress?: DownloadProgressCallback
+): Promise<string> {
+  assertAvailable();
+  const url = `https://huggingface.co/${entry.modelId}/resolve/${entry.commitHash}/${entry.modelFile}?download=true`;
+
+  let sub: ReturnType<NonNullable<typeof emitter>['addListener']> | null = null;
+  if (onProgress && emitter) {
+    sub = emitter.addListener(EVENT_DOWNLOAD_PROGRESS, (e: any) => {
+      onProgress({
+        receivedBytes: e.receivedBytes,
+        totalBytes: e.totalBytes,
+        bytesPerSecond: e.bytesPerSecond,
+        remainingMs: e.remainingMs,
+      });
+    });
+  }
+
+  return NativeAiCore!
+    .downloadModel(
+      url,
+      entry.name,
+      entry.commitHash,
+      entry.modelFile,
+      entry.sizeInBytes,
+      hfToken ?? ''
+    )
+    .finally(() => {
+      sub?.remove();
+    });
+}
+
+/**
+ * Cancels a download started with `downloadModel()`.
+ */
+export async function cancelDownload(): Promise<void> {
+  if (!NativeAiCore) return;
+  return NativeAiCore.cancelDownload();
+}
+
+/**
+ * Returns a list of models already downloaded to the device.
+ */
+export async function getDownloadedModels(): Promise<DownloadedModel[]> {
+  assertAvailable();
+  const raw = await NativeAiCore!.getDownloadedModels();
+  if (Array.isArray(raw)) return raw as DownloadedModel[];
+  return JSON.parse(raw as unknown as string) as DownloadedModel[];
+}
+
 // ── Default export (API object) ───────────────────────────────────────────────
 
 const AICore = {
@@ -239,6 +354,10 @@ const AICore = {
   release,
   resetConversation,
   cancelGeneration,
+  fetchModelCatalog,
+  downloadModel,
+  cancelDownload,
+  getDownloadedModels,
 };
 
 export default AICore;

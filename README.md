@@ -7,11 +7,12 @@
 
 > **⚠️ Development in Progress** — This library is under active development. APIs may change between minor versions. Not recommended for production use yet.
 
-On-device LLM inference for React Native using **Gemini Nano** via Google's AI Edge SDKs. Runs entirely on-device — no internet connection required, full privacy.
+On-device LLM inference for React Native using Google's **AI Edge SDKs**. Runs entirely on-device — no internet connection required, full privacy.
 
-Supports two backends:
-- **ML Kit AICore** (`genai-prompt`) — hardware-accelerated via the device NPU (Pixel 9+, Android 14+)
-- **MediaPipe Tasks GenAI** — file-based inference using a local `.bin` model (any Android device with API ≥ 26)
+Three backends, one API:
+- **LiteRT-LM** (`litertlm-android`) — load any HuggingFace-compatible `.task` model: **Gemma 4**, Gemma 3, Phi-4, Mistral, Llama 3 and more (Android API ≥ 26)
+- **ML Kit AICore** (`genai-prompt`) — hardware-accelerated Gemini Nano via device NPU (Pixel 9+, Android 14+, no model file needed)
+- **MediaPipe Tasks GenAI** (`tasks-genai`) — file-based inference with a local `.bin` model (any Android API ≥ 26)
 
 Built with TurboModules (New Architecture), JSI bridge, zero-overhead streaming via `NativeEventEmitter`.
 
@@ -24,6 +25,8 @@ Built with TurboModules (New Architecture), JSI bridge, zero-overhead streaming 
 | React Native | 0.76+ (New Architecture) |
 | Android API | 26 (Android 8) |
 | Kotlin | 1.9+ |
+
+**For LiteRT-LM backend:** Any Android device API ≥ 26. Requires a `.task` model file downloaded from HuggingFace Hub (see [Compatible models](#compatible-models)).
 
 **For ML Kit AICore backend:** Pixel 9 or any device with `Feature.AI_CORE` support (Android 14+, NPU required).
 
@@ -200,7 +203,7 @@ Initializes the inference engine.
 
 | Argument | Type | Description |
 |---|---|---|
-| `modelPath` | `string` | Pass `''` to use ML Kit AICore (native NPU). Pass an absolute path to a `.bin` file to use MediaPipe. |
+| `modelPath` | `string` | Pass `''` to use ML Kit AICore (native NPU). Pass an absolute path to a `.task` file to use LiteRT-LM. Pass an absolute path to a `.bin` file to use MediaPipe. |
 
 Returns `true` on success. Throws on failure.
 
@@ -372,7 +375,33 @@ See [`example/src/hooks/useAICore.ts`](example/src/hooks/useAICore.ts).
 
 ---
 
+## Compatible models
+
+The LiteRT-LM backend supports any model published on HuggingFace that provides a `.task` file compatible with the LiteRT-LM runtime. Models are downloaded from the Hub (optionally with a HuggingFace access token) and stored locally on the device.
+
+| Model | Size | Context | Notes |
+|---|---|---|---|
+| **Gemma 4 2B** (`gemma-4-e2b-it`) | ~2.4 GB | 32 K tokens | Recommended. Strong instruction following, fast on CPU |
+| **Gemma 3 1B** (`gemma-3-1b-it`) | ~1.1 GB | 8 K tokens | Fastest, lowest RAM |
+| **Gemma 3 4B** (`gemma-3-4b-it`) | ~3.5 GB | 8 K tokens | Best quality in the Gemma 3 family |
+| **Phi-4 Mini** (`phi-4-mini-instruct`) | ~2.5 GB | 16 K tokens | Strong reasoning |
+| **Mistral 7B** | ~4.1 GB | 8 K tokens | Requires ≥ 6 GB RAM |
+| **Llama 3.2 1B** | ~1.2 GB | 4 K tokens | Very fast |
+| **Llama 3.2 3B** | ~2.1 GB | 4 K tokens | Good balance of size and quality |
+
+> Models must be in LiteRT-LM `.task` format. Look for the `google-ai-edge` organisation on HuggingFace or use the model catalog built into the example app.
+
+---
+
 ## Backends
+
+### LiteRT-LM (file-based, any model)
+
+Used when `modelPath` points to a valid `.task` file. Works on any Android device with API ≥ 26. Download the model from HuggingFace Hub (use the built-in catalog in the example app, or any HuggingFace download tool) and pass the local file path to `initialize()`.
+
+The HuggingFace token (if required for gated models) is stored securely via the Android Keystore / iOS Keychain through `expo-secure-store`.
+
+Dependency: `com.google.ai.edge.litertlm:litertlm-android:0.10.0`
 
 ### ML Kit AICore (native NPU)
 
@@ -380,7 +409,7 @@ Used when `modelPath = ''`. Requires a Pixel 9 or compatible device with Android
 
 Dependency: `com.google.mlkit:genai-prompt:1.0.0-beta2`
 
-### MediaPipe Tasks GenAI (file-based)
+### MediaPipe Tasks GenAI (file-based, `.bin`)
 
 Used when `modelPath` points to a valid `.bin` file. Works on any Android device with API ≥ 26. You are responsible for placing the model file on the device (e.g., via `adb push` or a download manager).
 
@@ -395,11 +424,13 @@ Dependency: `com.google.mediapipe:tasks-genai:0.10.22`
 ## Roadmap
 
 - [ ] iOS support (Core ML / Apple Neural Engine)
-- [ ] Automatic model download manager
-- [ ] Model quantization options
+- [x] LiteRT-LM backend — Gemma 4, Gemma 3, Phi-4, Mistral, Llama 3 and more
+- [x] Model catalog + download from HuggingFace Hub
+- [x] HuggingFace token stored securely (Android Keystore / iOS Keychain)
+- [x] Abort/cancel streaming mid-generation
+- [ ] Model quantization options (INT4, INT8)
 - [ ] System prompt / persona configuration
 - [ ] Token count estimation
-- [x] Abort/cancel streaming mid-generation
 - [ ] Web support (WebGPU / WASM)
 
 ---

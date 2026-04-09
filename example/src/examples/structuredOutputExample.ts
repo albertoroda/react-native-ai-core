@@ -13,6 +13,14 @@ const WEEK_DAYS = [
 
 type WeekDay = (typeof WEEK_DAYS)[number];
 
+const TRAINING_DAYS = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+] as const;
+
 const SupportTicketSchema = z.object({
   category: z.enum(['bug', 'billing', 'feature', 'question']),
   priority: z.enum(['low', 'medium', 'high']),
@@ -22,27 +30,48 @@ const SupportTicketSchema = z.object({
 
 export type SupportTicket = z.infer<typeof SupportTicketSchema>;
 
-const ExerciseSchema = z.object({
+// ── Internal schema (minimal tokens) ─────────────────────────────────────────
+// Only Mon–Fri, exactly 3 exercises, no redundant fields.
+// "rest" instead of "restSeconds" saves tokens on every exercise.
+
+const InternalExerciseSchema = z.object({
   name: z.string(),
   sets: z.number(),
   reps: z.string(),
-  restSeconds: z.number(),
+  rest: z.number(),
 });
 
-const WorkoutDaySchema = z.object({
-  day: z.enum(WEEK_DAYS),
+const InternalDaySchema = z.object({
+  day: z.enum(TRAINING_DAYS),
   focus: z.string(),
-  exercises: z.array(ExerciseSchema).min(0).max(4),
+  exercises: z.array(InternalExerciseSchema).length(3),
 });
 
-const WorkoutPlanSchema = z.object({
-  goal: z.string(),
-  durationWeeks: z.number(),
-  days: z.array(WorkoutDaySchema).length(7),
-  notes: z.string(),
+const InternalPlanSchema = z.object({
+  days: z.array(InternalDaySchema).length(5),
 });
 
-export type WorkoutPlan = z.infer<typeof WorkoutPlanSchema>;
+// ── Public types ──────────────────────────────────────────────────────────────
+
+type Exercise = {
+  name: string;
+  sets: number;
+  reps: string;
+  restSeconds: number;
+};
+
+type WorkoutDay = {
+  day: (typeof WEEK_DAYS)[number];
+  focus: string;
+  exercises: Exercise[];
+};
+
+export type WorkoutPlan = {
+  goal: string;
+  durationWeeks: number;
+  days: WorkoutDay[];
+  notes: string;
+};
 
 function defaultTrainingExercises() {
   return [
@@ -52,7 +81,7 @@ function defaultTrainingExercises() {
   ];
 }
 
-function normalizeExercise(exercise: z.infer<typeof ExerciseSchema>) {
+function normalizeExercise(exercise: Exercise) {
   const name = exercise.name.trim() || 'Accessory Lift';
   const sets = Number.isFinite(exercise.sets)
     ? Math.min(6, Math.max(2, Math.round(exercise.sets)))
@@ -64,12 +93,11 @@ function normalizeExercise(exercise: z.infer<typeof ExerciseSchema>) {
   return { name, sets, reps, restSeconds };
 }
 
-function buildFallbackDay(day: WeekDay): z.infer<typeof WorkoutDaySchema> {
+function buildFallbackDay(day: WeekDay): WorkoutDay {
   const weekend = day === 'Saturday' || day === 'Sunday';
   if (weekend) {
     return { day, focus: 'Rest', exercises: [] };
   }
-
   return {
     day,
     focus: 'Strength + conditioning',
@@ -77,47 +105,33 @@ function buildFallbackDay(day: WeekDay): z.infer<typeof WorkoutDaySchema> {
   };
 }
 
-function normalizeWorkoutPlan(plan: WorkoutPlan): WorkoutPlan {
-  const firstByDay = new Map<WeekDay, z.infer<typeof WorkoutDaySchema>>();
-  for (const dayPlan of plan.days) {
-    if (!firstByDay.has(dayPlan.day)) {
-      firstByDay.set(dayPlan.day, dayPlan);
-    }
-  }
+function expandInternalPlan(
+  internal: z.infer<typeof InternalPlanSchema>
+): WorkoutPlan {
+  const byDay = new Map(internal.days.map((d) => [d.day, d]));
 
-  const days = WEEK_DAYS.map((day) => {
-    const source = firstByDay.get(day) ?? buildFallbackDay(day);
+  const days = WEEK_DAYS.map((day): WorkoutDay => {
     const weekend = day === 'Saturday' || day === 'Sunday';
+    if (weekend) return { day, focus: 'Rest', exercises: [] };
 
-    let exercises = source.exercises.map((exercise) =>
-      normalizeExercise(exercise)
+    const src = byDay.get(day as (typeof TRAINING_DAYS)[number]);
+    if (!src) return buildFallbackDay(day);
+
+    const exercises = src.exercises.map((e) =>
+      normalizeExercise({ ...e, restSeconds: e.rest })
     );
-
-    if (weekend) {
-      exercises = [];
-    } else {
-      if (exercises.length > 4) exercises = exercises.slice(0, 4);
-      if (exercises.length < 3) {
-        const fallback = defaultTrainingExercises();
-        for (let i = exercises.length; i < 3; i++) {
-          exercises.push(fallback[i]!);
-        }
-      }
-    }
 
     return {
       day,
-      focus: weekend
-        ? 'Rest'
-        : source.focus.trim() || 'Strength + conditioning',
+      focus: src.focus.trim() || 'Strength + conditioning',
       exercises,
     };
   });
 
   return {
-    goal: plan.goal.trim() || 'Strength + fat loss',
+    goal: 'Strength + fat loss',
     durationWeeks: 1,
-    notes: plan.notes.trim() || 'Progressively increase load week to week.',
+    notes: 'Progressively increase load week to week.',
     days,
   };
 }
@@ -157,22 +171,24 @@ export async function buildWeeklyWorkoutPlan(
   signal?: AbortSignal
 ) {
   try {
-    const generated = await generateStructuredResponse({
+    // Use the minimal internal schema with single strategy — 1 inference call
+    // instead of 20+ chunked calls. Gemma 4 handles the full JSON in one shot.
+    const internal = await generateStructuredResponse({
       prompt:
-        'Create a coherent 1-week workout JSON. Constraints: exactly 7 unique days in this exact order Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday. Monday-Friday are training days with 3 or 4 exercises each. Saturday and Sunday are rest days with exercises as empty array. Keep exercise names short (2-4 words).',
-      output: WorkoutPlanSchema,
-      strategy: 'chunked',
+        'Output a 5-day strength workout plan for Monday to Friday. ' +
+        'Each day: unique day name, short focus label, exactly 3 exercises. ' +
+        'Each exercise: short name (2-4 words), sets, reps as string (e.g. "8-10"), rest in seconds.',
+      output: InternalPlanSchema,
+      strategy: 'single',
       maxRetries: 2,
-      timeoutMs: 90000,
+      timeoutMs: 180000,
       onProgress,
       signal,
     });
 
-    return normalizeWorkoutPlan(generated);
+    return expandInternalPlan(internal);
   } catch (err) {
-    // Re-throw if user deliberately cancelled
     if ((err as { name?: string }).name === 'AbortError') throw err;
-    // Never fail the example UX because of on-device timeout/quota.
     onProgress?.('fallback.localPlan', false);
     const fallback = buildDeterministicWorkoutPlan();
     onProgress?.('fallback.localPlan', true);

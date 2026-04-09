@@ -319,32 +319,28 @@ interface Props {
 export function MessageBubble({ message }: Props) {
   const isUser = message.role === 'user';
 
-  return (
-    <View style={[styles.row, isUser ? styles.rowRight : styles.rowLeft]}>
-      {!isUser && (
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>AI</Text>
-        </View>
-      )}
-
-      <View
-        style={[
-          styles.bubble,
-          isUser ? styles.bubbleUser : styles.bubbleAssistant,
-          message.error && styles.bubbleError,
-        ]}
-      >
-        {isUser ? (
+  if (isUser) {
+    return (
+      <View style={styles.rowUser}>
+        <View style={[styles.bubbleUser, message.error && styles.bubbleError]}>
           <Text style={styles.contentUser}>{message.content}</Text>
-        ) : message.error ? (
-          <Text style={styles.contentError}>{message.content}</Text>
-        ) : (
-          <MarkdownContent
-            content={message.content}
-            streaming={message.streaming}
-          />
-        )}
+        </View>
       </View>
+    );
+  }
+
+  return (
+    <View style={styles.rowAssistant}>
+      {message.error ? (
+        <View style={styles.bubbleErrorContainer}>
+          <Text style={styles.contentError}>{message.content}</Text>
+        </View>
+      ) : (
+        <MarkdownContent
+          content={message.content}
+          streaming={message.streaming}
+        />
+      )}
     </View>
   );
 }
@@ -356,35 +352,35 @@ const mono = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 /** Estilos de markdown (usados dentro de burbujas de asistente) */
 const md = StyleSheet.create({
   container: { gap: 2 },
-  paragraph: { fontSize: 15, lineHeight: 22, color: '#1e293b' },
-  h1: { fontSize: 20, fontWeight: '700', color: '#0f172a', lineHeight: 28 },
-  h2: { fontSize: 17, fontWeight: '700', color: '#1e293b', lineHeight: 24 },
-  h3: { fontSize: 15, fontWeight: '700', color: '#334155', lineHeight: 22 },
+  paragraph: { fontSize: 15, lineHeight: 23, color: '#e2e8f0' },
+  h1: { fontSize: 20, fontWeight: '700', color: '#f1f5f9', lineHeight: 28 },
+  h2: { fontSize: 17, fontWeight: '700', color: '#f1f5f9', lineHeight: 24 },
+  h3: { fontSize: 15, fontWeight: '700', color: '#cbd5e1', lineHeight: 22 },
   bold: { fontWeight: '700' },
   italic: { fontStyle: 'italic' },
   boldItalic: { fontWeight: '700', fontStyle: 'italic' },
   inlineCode: {
     fontFamily: mono,
     fontSize: 13,
-    backgroundColor: '#dde5f0',
-    color: '#0f172a',
+    backgroundColor: '#1e293b',
+    color: '#7dd3fc',
     borderRadius: 3,
-    paddingHorizontal: 3,
+    paddingHorizontal: 4,
   },
   listItem: { flexDirection: 'row', alignItems: 'flex-start' },
   bullet: {
     fontSize: 15,
-    color: '#6366f1',
-    marginRight: 6,
-    lineHeight: 22,
-    minWidth: 16,
+    color: '#818cf8',
+    marginRight: 8,
+    lineHeight: 23,
+    minWidth: 18,
   },
-  listText: { flex: 1, fontSize: 15, lineHeight: 22, color: '#1e293b' },
+  listText: { flex: 1, fontSize: 15, lineHeight: 23, color: '#e2e8f0' },
   codeBlock: {
-    backgroundColor: '#1e293b',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    backgroundColor: '#0d1117',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
   codeText: {
     fontFamily: mono,
@@ -392,8 +388,8 @@ const md = StyleSheet.create({
     color: '#e2e8f0',
     lineHeight: 20,
   },
-  rule: { height: 1, backgroundColor: '#cbd5e1' },
-  cursor: { color: '#6366f1', fontWeight: '200' },
+  rule: { height: 1, backgroundColor: '#1e3148' },
+  cursor: { color: '#818cf8', fontWeight: '200' },
   mt2: { marginTop: 2 },
   mt4: { marginTop: 4 },
   mt6: { marginTop: 6 },
@@ -401,34 +397,36 @@ const md = StyleSheet.create({
 });
 
 const styles = StyleSheet.create({
-  row: {
+  // User message: pill alineada a la derecha
+  rowUser: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
-    marginVertical: 4,
-    paddingHorizontal: 12,
+    justifyContent: 'flex-end',
+    paddingHorizontal: 16,
+    paddingVertical: 4,
   },
-  rowRight: { justifyContent: 'flex-end' },
-  rowLeft: { justifyContent: 'flex-start' },
-  avatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+  bubbleUser: {
+    maxWidth: '78%',
     backgroundColor: '#6366f1',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 6,
-    marginBottom: 2,
-  },
-  avatarText: { color: '#fff', fontSize: 10, fontWeight: '700' },
-  bubble: {
-    maxWidth: '82%',
-    borderRadius: 16,
-    paddingHorizontal: 14,
+    borderRadius: 20,
+    borderBottomRightRadius: 5,
+    paddingHorizontal: 16,
     paddingVertical: 10,
   },
-  bubbleUser: { backgroundColor: '#6366f1', borderBottomRightRadius: 4 },
-  bubbleAssistant: { backgroundColor: '#f1f5f9', borderBottomLeftRadius: 4 },
-  bubbleError: { backgroundColor: '#fee2e2' },
+  bubbleError: { backgroundColor: '#450a0a' },
   contentUser: { fontSize: 15, lineHeight: 22, color: '#ffffff' },
-  contentError: { fontSize: 15, lineHeight: 22, color: '#b91c1c' },
+
+  // Assistant message: sin fondo, full width
+  rowAssistant: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  bubbleErrorContainer: {
+    backgroundColor: '#450a0a',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: '#ef4444',
+  },
+  contentError: { fontSize: 15, lineHeight: 22, color: '#fca5a5' },
 });
