@@ -1,6 +1,6 @@
 {
   "name": "react-native-ai-core",
-  "version": "0.5.1",
+  "version": "0.5.9",
   "description": "On-device LLM inference for React Native — Gemma 4, Gemma 3, Phi-4, Mistral, Llama 3 and more via Google AI Edge LiteRT-LM, ML Kit AICore and MediaPipe",
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
@@ -77,10 +77,7 @@
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
-  "dependencies": {
-    "expo-secure-store": "^55.0.12",
-    "zod": "^3.24.1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@eslint/compat": "^2.0.3",
     "@eslint/eslintrc": "^3.3.5",
@@ -100,11 +97,19 @@
     "react-native-builder-bob": "^0.41.0",
     "release-it": "^19.2.4",
     "turbo": "^2.8.21",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "zod": "^4",
+    "expo-secure-store": "^55.0.12"
   },
   "peerDependencies": {
     "react": "*",
-    "react-native": "*"
+    "react-native": "*",
+    "zod": "^4"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": false
+    }
   },
   "workspaces": [
     "example"

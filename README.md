@@ -55,6 +55,20 @@ The native module is auto-linked. The library's `AndroidManifest.xml` is merged 
 
 ---
 
+## HuggingFace Token
+
+Most models in the catalog are **gated** — you need a free HuggingFace account and a read token.
+
+1. Sign up at [huggingface.co](https://huggingface.co/join).
+2. Go to **Settings → Access Tokens → New token** — choose *Read* scope.
+3. Copy the token (starts with `hf_…`).
+4. Accept each model's license on its HuggingFace page (e.g. [Gemma 4 2B](https://huggingface.co/google/gemma-4-2b-it-litertlm)) — click **Agree and access repository**.
+5. Pass the token to `ensureModel()` via the `hfToken` option.
+
+> Store the token securely (e.g. Keychain / Android Keystore). Never hardcode it in source code.
+
+---
+
 ## Quick Start
 
 ```tsx
@@ -86,6 +100,45 @@ await AICore.initialize('/data/user/0/com.myapp/files/ai-core-models/Gemma-4-E2B
 
 // MediaPipe backend (any .bin file)
 await AICore.initialize('/sdcard/Download/model.bin');
+```
+
+### Vision (image + text)
+
+Requires a vision-capable model (`GEMMA4_2B`, `GEMMA4_4B`, `GEMMA3N_2B`, or `GEMMA3N_4B`) and `configure({ enableVision: true })` **before** `ensureModel()`.
+
+```tsx
+import AICore, { KnownModel } from 'react-native-ai-core';
+
+// 1. Enable GPU vision backend
+await AICore.configure({ enableVision: true });
+await AICore.ensureModel(KnownModel.GEMMA4_2B, { hfToken: 'hf_…' });
+
+// 2. Convert image to base64 (e.g. with expo-image-picker + expo-file-system)
+const base64 = await FileSystem.readAsStringAsync(imageUri, { encoding: 'base64' });
+
+// 3. Blocking
+const answer = await AICore.generateResponseWithImage(base64, 'Describe this image.');
+
+// 4. Or streaming
+const unsubscribe = AICore.generateResponseStreamWithImage(base64, 'What is in this photo?', {
+  onToken:    (token) => setAnswer((p) => p + token),
+  onComplete: () => setRunning(false),
+  onError:    (err) => console.error(err),
+});
+```
+
+### Rendering responses
+
+`AICoreMarkdown` renders the model's markdown output natively — no external dependencies.
+
+```tsx
+import { AICoreMarkdown } from 'react-native-ai-core';
+
+// Static
+<AICoreMarkdown>{answer}</AICoreMarkdown>
+
+// While streaming — shows a blinking cursor
+<AICoreMarkdown streaming>{partialAnswer}</AICoreMarkdown>
 ```
 
 ### Streaming
@@ -141,6 +194,8 @@ const result = await generateStructuredResponse({
 | `cancelGeneration()` | `Promise<void>` | Stop an in-progress `generateResponse` or `generateResponseStream` call |
 | `generateResponseStateless(prompt)` | `Promise<string>` | One-shot inference that does **not** pollute conversation history |
 | `generateStructuredResponse(options)` | `Promise<T>` | Generate and validate structured JSON output against a Zod schema |
+| `generateResponseWithImage(base64, prompt)` | `Promise<string>` | Blocking image + text inference. Requires `configure({ enableVision: true })` |
+| `generateResponseStreamWithImage(base64, prompt, callbacks)` | `() => void` | Streaming image + text inference. Returns a cleanup function |
 
 ### Model management
 
@@ -161,11 +216,24 @@ const result = await generateStructuredResponse({
 | `setSystemPrompt(prompt)` | `Promise<void>` | Inject a persistent system-level instruction that is prepended to every subsequent generation call. Has no visible effect in chat history |
 | `clearSystemPrompt()` | `Promise<void>` | Remove the active system prompt |
 
+### Runtime configuration
+
+| Method | Returns | Description |
+|---|---|---|
+| `configure(options)` | `Promise<void>` | Update inference parameters at runtime without reinitialising the engine. Includes `enableVision`. See [`AICoreConfig`](#aicoreconfig) |
+
 ### Token estimation
 
 | Method | Returns | Description |
 |---|---|---|
 | `getTokenCount(text)` | `Promise<number>` | Estimate the token count for a given string. Useful for checking context-window budget before sending large inputs |
+
+### UI components
+
+| Export | Description |
+|---|---|
+| `AICoreMarkdown` | Native markdown renderer for LLM responses. Supports headings, bold, italic, code blocks, lists, and a streaming cursor |
+| `visionModels` | Array of `KnownModelEntry` objects that support vision inference |
 
 ---
 
@@ -277,6 +345,46 @@ export interface AIError {
   code:    string;
   message: string;
 }
+
+export interface AICoreConfig {
+  inferenceTimeoutSec?: number; // [30–3600], default 420
+  temperature?: number;         // [0.0–2.0], default 0.7
+  topK?: number;                // [1–256], default 64
+  maxContinuations?: number;    // [0–50], default 12
+  enableVision?: boolean;       // Enable GPU vision backend (required for *WithImage methods)
+}
+
+export interface AICoreMarkdownProps {
+  children: string;       // Markdown string to render
+  streaming?: boolean;    // Show blinking cursor while streaming (default: false)
+  textColor?: string;     // Base text color (default: '#e2e8f0')
+  headingColor?: string;  // Heading color (default: '#f1f5f9')
+}
+```
+
+---
+
+## `AICoreConfig`
+
+Passed to `configure()`. All fields are optional — omit any field (or pass `-1`) to keep the current value.
+
+| Field | Type | Default | Range | Notes |
+|---|---|---|---|---|
+| `inferenceTimeoutSec` | `number` | `420` | 30–3600 | Seconds before inference is aborted. Increase for long-form responses (e.g. meal plans, code generation) |
+| `temperature` | `number` | `0.7` | 0.0–2.0 | Sampling randomness. For **LiteRT-LM**: takes effect on the next `resetConversation()` or `initialize()` |
+| `topK` | `number` | `64` | 1–256 | Top-K sampling. For **LiteRT-LM**: takes effect on the next `resetConversation()` or `initialize()` |
+| `maxContinuations` | `number` | `12` | 0–50 | Maximum auto-continuation passes. Only applies to the `aicore` (Gemini Nano / ML Kit) engine |
+| `enableVision` | `boolean` | `false` | — | Enable the GPU vision backend. Must be set **before** `ensureModel()`. Required for `generateResponseWithImage` and `generateResponseStreamWithImage` |
+
+```typescript
+// Increase timeout for a very long document summary
+await AICore.configure({ inferenceTimeoutSec: 900 });
+
+// More creative, less deterministic
+await AICore.configure({ temperature: 1.2, topK: 80 });
+
+// Mix — only the fields you pass are changed
+await AICore.configure({ inferenceTimeoutSec: 600, temperature: 0.5 });
 ```
 
 ---
@@ -398,6 +506,10 @@ Dependency: `com.google.mediapipe:tasks-genai:0.10.22`
 - [x] `generateResponseStateless()` — one-shot inference without history pollution
 - [x] `getInitializedModel()` — query what is currently loaded
 - [x] `KnownModel` registry with `Engine` enum
+- [x] `configure()` — tune timeout, temperature, topK and continuation passes at runtime
+- [x] Vision (image + text) inference — `generateResponseWithImage` / `generateResponseStreamWithImage`
+- [x] `AICoreMarkdown` — native zero-dependency markdown renderer with streaming cursor
+- [x] `visionModels` — curated list of vision-capable model entries
 - [ ] iOS support (Core ML / Apple Neural Engine)
 - [ ] Model quantization options (INT4, INT8)
 - [ ] Web support (WebGPU / WASM)

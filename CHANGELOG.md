@@ -7,6 +7,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.9] - 2026-04-10
+
+### Added
+
+- **Multimodal (Vision) inference** — New API for image + text on-device inference using the LiteRT-LM GPU backend. Supports Gemma 4 and Gemma 3n models.
+
+  ```typescript
+  import AICore, { KnownModel } from 'react-native-ai-core';
+
+  // 1. Enable vision before initializing
+  await AICore.configure({ enableVision: true });
+  await AICore.ensureModel(KnownModel.GEMMA4_2B, { hfToken });
+
+  // 2. Analyze an image (base64-encoded PNG/JPEG)
+  const description = await AICore.generateResponseWithImage(base64, 'What is in this image?');
+
+  // 3. Or stream the response token by token
+  const unsubscribe = AICore.generateResponseStreamWithImage(base64, 'Describe this image', {
+    onToken:    (token, done) => console.log(token),
+    onComplete: () => console.log('done'),
+    onError:    (err) => console.error(err),
+  });
+  ```
+
+  | Method | Returns | Description |
+  |---|---|---|
+  | `configure({ enableVision: true })` | `Promise<void>` | Enable the GPU vision backend before calling `ensureModel` |
+  | `generateResponseWithImage(base64, prompt)` | `Promise<string>` | Blocking image inference |
+  | `generateResponseStreamWithImage(base64, prompt, callbacks)` | `() => void` | Streaming image inference. Returns cleanup function |
+
+  Vision-capable models: `GEMMA4_2B`, `GEMMA4_4B`, `GEMMA3N_2B`, `GEMMA3N_4B`.
+
+- **`AICoreMarkdown` component** — Zero-dependency markdown renderer for LLM responses. Exported directly from the library.
+
+  ```tsx
+  import { AICoreMarkdown } from 'react-native-ai-core';
+
+  <AICoreMarkdown streaming={isStreaming}>{answer}</AICoreMarkdown>
+  ```
+
+  Supports: headings (`#`, `##`, `###`), **bold**, *italic*, ***bold-italic***, `inline code`, fenced code blocks, ordered/unordered lists, horizontal rules, and a blinking cursor while streaming.
+
+  | Prop | Type | Default | Description |
+  |---|---|---|---|
+  | `children` | `string` | — | Markdown string to render |
+  | `streaming` | `boolean` | `false` | Shows a blinking `▌` cursor at the end |
+  | `textColor` | `string` | `'#e2e8f0'` | Base text color |
+  | `headingColor` | `string` | `'#f1f5f9'` | Heading color |
+
+- **`visionModels` export** — Convenience array of all `KnownModelEntry` objects that support vision, for use in model picker UIs.
+
+  ```ts
+  import { visionModels } from 'react-native-ai-core';
+  // [GEMMA4_2B, GEMMA4_4B, GEMMA3N_2B, GEMMA3N_4B]
+  ```
+
+- **`KnownModelEntry.supportsVision`** — New optional boolean field on `KnownModelEntry`. `true` for Gemma 4 and Gemma 3n models.
+
+### Changed
+
+- **`AICoreConfig`** — Added `enableVision?: boolean` field. When `true`, the LiteRT-LM engine initializes the GPU vision backend (required before calling any `*WithImage` method).
+
+- **`expo-secure-store`** — Moved from `dependencies` to `devDependencies` in the library root. It is only used by the example app. Existing consumers are unaffected.
+
+### Fixed
+
+- **GPU vision backend deadlock** — `generateResponseStreamWithImage` previously used a single-thread executor + `CountDownLatch`. The GPU backend dispatches `sendMessageAsync` callbacks on the same thread, causing a deadlock (silent freeze, no tokens emitted). Replaced with `coroutineScope.launch(Dispatchers.IO)` + `suspendCancellableCoroutine` — the thread suspends without blocking and the GPU callback resumes it correctly.
+
+---
+
+## [0.5.8] - 2026-04-09
+
+### Added
+
+- **`configure(options)` — runtime inference configuration** — New public API that lets the caller tune key inference parameters at any time without reinitialising the engine.
+
+  ```typescript
+  // Increase timeout for long document summarisation
+  await AICore.configure({ inferenceTimeoutSec: 900 });
+
+  // More creative outputs
+  await AICore.configure({ temperature: 1.2, topK: 80 });
+
+  // Multiple parameters at once
+  await AICore.configure({ inferenceTimeoutSec: 1200, temperature: 0.5, maxContinuations: 20 });
+  ```
+
+  | Option | Default | Range | Notes |
+  |---|---|---|---|
+  | `inferenceTimeoutSec` | 420 | 30–3600 | Seconds before inference times out. Increase for very long responses |
+  | `temperature` | 0.7 | 0.0–2.0 | Sampling temperature. For LiteRT-LM: takes effect on the next `resetConversation()` or `initialize()` |
+  | `topK` | 64 | 1–256 | Top-K sampling. For LiteRT-LM: takes effect on the next `resetConversation()` or `initialize()` |
+  | `maxContinuations` | 12 | 0–50 | Max MLKit continuation passes (AICore/Gemini Nano engine only) |
+
+  Any field omitted (or explicitly set to `-1`) keeps its current value. Bounds are enforced on the native side (Kotlin).
+
+### Changed
+
+- **`INFERENCE_TIMEOUT_SEC`, `DEFAULT_TEMPERATURE`, `DEFAULT_TOP_K`, `MAX_CONTINUATIONS`** — These were compile-time `companion object` constants in `AiCoreModule.kt`. They are now `@Volatile` instance variables initialised to the same defaults, updated via `configure()`. Existing behaviour is identical for callers that do not call `configure()`.
+
+---
+
+## [0.5.7] - 2026-04-09
+
+### Changed
+
+- **`message.toString()` in LiteRT-LM callbacks** — Both the stateless (`generateResponseStateless`) and streaming (`generateResponseStream`) LiteRT-LM `onMessage` callbacks now use `message.toString()` instead of the multi-cast `(message.contents.contents.firstOrNull() as? Content.Text)?.text`. This matches the pattern used by the official Google AI Edge Gallery and is more resilient to future changes in `Message`'s internal structure.
+
+- **KV cache reset after stateless generation (example)** — `runWeeklyMenuExample` (Example 4) now calls `AICore.resetConversation()` in its `finally` block. LiteRT-LM shares a single KV cache between all calls on the same engine; without the reset, a ~2500-token weekly-menu response would consume chat context window on the next message. The reset is best-effort and does not affect the returned result.
+
+- **`onRawToken` passes delta, not accumulated string** — `runWeeklyMenuStreamExample` (Example 5) now calls `onRawToken(token)` with only the new fragment instead of the full accumulated text. `LocalAITab` concatenates via a functional state updater `setStreamRaw((prev) => (prev ?? '') + delta)`. This makes the per-token render cost constant regardless of response length, fixing progressive slowdown in the live preview panel during long generations.
+
+### Fixed
+
+- **`FAILED_PRECONDITION: A session already exists` crash** — An earlier attempt to create a second fresh LiteRT-LM conversation for stateless calls was reverted: the engine only supports one conversation at a time. The KV cache isolation is now achieved by resetting the shared conversation after each stateless call instead.
+
+---
+
+## [0.5.6] - 2026-04-09
+
+### Fixed
+
+- **`Conversation is not alive` FATAL crash (LiteRT-LM)** — `sendMessageAsync` throws `IllegalStateException` synchronously when the underlying `Conversation` object has already been closed (e.g. a concurrent `initialize()` or `release()` call). Because the executor blocks had no outer `try/catch`, this exception escaped the thread pool and caused an uncaught-exception crash. Both the stateless (`generateResponseStateless`) and streaming (`generateResponseStream`) LiteRT-LM paths are now wrapped in a `try/catch(IllegalStateException)` that resets the conversation and rejects/emits a recoverable `CONVERSATION_RESET` error code instead of crashing.
+
+### Added
+
+- **Per-model `maxContextLength`** — `KnownModelEntry` now accepts an optional `maxContextLength` field. `KnownModel.GEMMA4_2B` and `KnownModel.GEMMA4_4B` are set to `32000`. The value is forwarded through `initialize(modelPath, maxContextLength)` all the way to the Android `EngineConfig(maxNumTokens = ...)`, replacing the previous hardcoded `4096`. Models without the field continue to default to `4096`. This allows Gemma 4 to use its full 32 K context window instead of being silently capped.
+
+- **`CONTEXT_LIMIT_EXCEEDED` error code** — when LiteRT-LM's `onError` callback fires with a message containing `"context"`, `"token"`, `"exceed"` or `"out of range"`, the library now rejects with the dedicated code `CONTEXT_LIMIT_EXCEEDED` (stateless path) or emits it on `EVENT_STREAM_ERROR` (streaming path), and automatically resets the conversation so the next call starts fresh.
+
+- **`estimatedArraySize` and `maxChunkedCalls` options** — `generateStructuredResponse` (chunked strategy) now accepts two new options to control the complexity guard. `estimatedArraySize` (default `5`) overrides the per-array element count used by the estimator, so schemas that produce 2-3 items per array are not incorrectly rejected. `maxChunkedCalls` (default `150`) overrides the hard limit for callers that have verified their device can handle a larger number of calls. The error message now also explains how to use these options instead of saying "split your schema".
+
+---
+
+## [0.5.5] - 2026-04-09
+
+### Fixed
+
+- **`Conversation is not alive` FATAL crash (LiteRT-LM)** — `sendMessageAsync` throws `IllegalStateException` synchronously when the underlying `Conversation` object has already been closed (e.g. a concurrent `initialize()` or `release()` call). Because the executor blocks had no outer `try/catch`, this exception escaped the thread pool and caused an uncaught-exception crash. Both the stateless (`generateResponseStateless`) and streaming (`generateResponseStream`) LiteRT-LM paths are now wrapped in a `try/catch(IllegalStateException)` that resets the conversation and rejects/emits a recoverable `CONVERSATION_RESET` error code instead of crashing.
+
+### Added
+
+- **Per-model `maxContextLength`** — `KnownModelEntry` now accepts an optional `maxContextLength` field. `KnownModel.GEMMA4_2B` and `KnownModel.GEMMA4_4B` are set to `32000`. The value is forwarded through `initialize(modelPath, maxContextLength)` all the way to the Android `EngineConfig(maxNumTokens = ...)`, replacing the previous hardcoded `4096`. Models without the field continue to default to `4096`. This allows Gemma 4 to use its full 32 K context window instead of being silently capped.
+
+- **`CONTEXT_LIMIT_EXCEEDED` error code** — when LiteRT-LM's `onError` callback fires with a message containing `"context"`, `"token"`, `"exceed"` or `"out of range"`, the library now rejects with the dedicated code `CONTEXT_LIMIT_EXCEEDED` (stateless path) or emits it on `EVENT_STREAM_ERROR` (streaming path), and automatically resets the conversation so the next call starts fresh.
+
+- **`estimatedArraySize` and `maxChunkedCalls` options** — `generateStructuredResponse` (chunked strategy) now accepts two new options to control the complexity guard. `estimatedArraySize` (default `5`) overrides the per-array element count used by the estimator, so schemas that produce 2-3 items per array are not incorrectly rejected. `maxChunkedCalls` (default `150`) overrides the hard limit for callers that have verified their device can handle a larger number of calls. The error message now also explains how to use these options instead of saying "split your schema".
+
+---
+
+## [0.5.4] - 2026-04-09
+
+### Fixed
+
+- **`ZodDefault` not unwrapped** — `unwrapModifiers` and `zodTypeToDescription` now handle `z.ZodDefault` (produced by `.default(value)` on any schema field). Previously such fields were treated as `unknown`, causing the generated JSON description sent to the model to omit the field entirely.
+
+- **`ZodEnum.options` type change (zod v4)** — `.options` is now `EnumValue[]` (`string | number`) instead of `string[]`. Fixed by casting to `unknown` before `JSON.stringify` in `zodTypeToDescription` and adding `.map(String)` in `getEnumOptions`.
+
+### Added
+
+- **Chunked-call guard (`MAX_ESTIMATED_CHUNKED_CALLS = 150`)** — `estimateChunkedCalls(schema)` recursively counts the number of native inference calls that `generateChunked` would produce. If the estimate exceeds 150, `generateStructuredResponse` throws `StructuredOutputError` immediately instead of launching hundreds of calls that would exhaust device memory. A 35-meal `WeeklyMenuSchema` was previously causing ~280 calls and an OOM crash with Gemma 4; it now throws a clear, actionable error.
+
+- **Prompt-length guard** — if the rendered prompt exceeds `STRUCTURED_PROMPT_BUDGET × 3` (7 800 chars) the library throws `StructuredOutputError` instead of silently truncating the prompt mid-schema (which caused garbled or empty model output).
+
+---
+
+## [0.5.3] - 2026-04-09
+
+### Fixed
+
+- **Catalog data — missing fields** — The inlined catalog entries in `src/model-catalog-data.ts` were missing extra fields present in the JSON source files (`llmSupportImage`, `llmSupportAudio`, `llmSupportThinking`, `defaultConfig`, `taskTypes`, `bestForTaskTypes`). All entries for v1.0.8 through v1.0.11 and `ios_1.0.0` now include the full field set from their corresponding JSON files.
+
+- **zod upgraded to v4 (`^4`)** — peer dependency updated from `">=3.24.1"` to `"^4"`. Two internal fixes applied: `ZodEnum.options.map((value: unknown) => JSON.stringify(value))` and `getEnumOptions` now uses `.map(String)`.
+
+---
+
+## [0.5.2] - 2026-04-09
+
+### Fixed
+
+- **Catalog bundling — Metro "Unable to resolve" error** — `fetchModelCatalog()` previously used `require('../model_allowlists/*.json')`. Babel copies require-string literals verbatim: the path `'../model_allowlists/'` is correct relative to `src/`, but the compiled output lives in `lib/module/`, so that same path resolves to `lib/model_allowlists/` which does not exist in the installed package. Fixed by inlining all catalog data into a co-located TypeScript source file (`src/model-catalog-data.ts`). Babel compiles it alongside `index.ts` and the resulting `lib/module/model-catalog-data.js` is always adjacent to `lib/module/index.js`, making the `'./model-catalog-data'` import work correctly regardless of where the package is installed.
+
+- **`zod` moved to `peerDependencies`** — `zod` was listed as a `dependency`, causing npm to install a second copy alongside a consumer project that already had `zod@^4.x`. Because Zod v3 and v4 types are incompatible, this silently broke `generateStructuredResponse`. `zod` is now a peer dependency (`">=3.24.1"`) so only one instance is resolved. Consumers must add `zod` to their own `dependencies` — this was already required in practice to define output schemas.
+
+---
+
 ## [0.5.1] - 2026-04-09
 
 ### Changed

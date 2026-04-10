@@ -1,7 +1,10 @@
 package com.aicore
 
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
+import android.util.Base64
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -25,6 +28,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
@@ -38,6 +44,7 @@ import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
@@ -69,22 +76,36 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   @Volatile private var activeDownloadCall: okhttp3.Call? = null
   private val downloadExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
+  // Guard against closing the LiteRT-LM engine while native inference is in
+  // flight — a concurrent close() causes SIGSEGV in the native thread.
+  @Volatile private var inferenceInFlight = false
+
+  // ── Runtime-configurable inference parameters ─────────────────────────────
+  // Defaults mirror the companion-object constants; updated via configure().
+  @Volatile private var inferenceTimeoutSec: Long = DEFAULT_INFERENCE_TIMEOUT_SEC
+  @Volatile private var configTemperature: Float  = DEFAULT_TEMPERATURE_VALUE
+  @Volatile private var configTopK: Int           = DEFAULT_TOP_K_VALUE
+  @Volatile private var configMaxContinuations: Int = DEFAULT_MAX_CONTINUATIONS
+  @Volatile private var configEnableVision: Boolean = false
+
   companion object {
     const val NAME = NativeAiCoreSpec.NAME
-    const val EVENT_STREAM_TOKEN    = "AICore_streamToken"
-    const val EVENT_STREAM_COMPLETE = "AICore_streamComplete"
-    const val EVENT_STREAM_ERROR    = "AICore_streamError"
+    const val EVENT_STREAM_TOKEN      = "AICore_streamToken"
+    const val EVENT_STREAM_COMPLETE   = "AICore_streamComplete"
+    const val EVENT_STREAM_ERROR      = "AICore_streamError"
     const val EVENT_DOWNLOAD_PROGRESS = "AICore_downloadProgress"
-    private const val DEFAULT_TEMPERATURE      = 0.7f
+    const val EVENT_STATELESS_TOKEN   = "AICore_statelessToken"
     private const val DEFAULT_MAX_TOKENS        = 4096  // MediaPipe context window (input+output)
     private const val LITERTLM_MAX_TOKENS       = 4096  // LiteRT-LM: context window (input+output)
-    private const val INFERENCE_TIMEOUT_SEC     = 180L  // 3 min max per inference (prevents ANR if onDone() never fires)
     private const val REQUESTED_MAX_OUTPUT_TOKENS = 256
     private const val FALLBACK_MAX_OUTPUT_TOKENS = 256
-    private const val DEFAULT_TOP_K             = 64
     private const val PROMPT_CHAR_BUDGET        = 4000
     private const val HISTORY_MAX_CHARS         = 9000
-    private const val MAX_CONTINUATIONS         = 12
+    // ── Defaults for runtime-configurable parameters (see configure()) ────────
+    private const val DEFAULT_TEMPERATURE_VALUE     = 0.7f
+    private const val DEFAULT_TOP_K_VALUE           = 64
+    private const val DEFAULT_INFERENCE_TIMEOUT_SEC = 420L  // 7 min — covers ~2500 tok @ 15 tok/s
+    private const val DEFAULT_MAX_CONTINUATIONS     = 12
     private const val MAX_STREAM_IDLE_RETRIES   = 3
     private const val QUOTA_ERROR_CODE          = 9  // AICore NPU quota exceeded error code
     private const val CONTINUATION_DELAY_MS     = 1200L
@@ -373,10 +394,19 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
 
   private fun startInferenceService() {
     val intent = Intent(reactApplicationContext, InferenceService::class.java)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      reactApplicationContext.startForegroundService(intent)
-    } else {
-      reactApplicationContext.startService(intent)
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        reactApplicationContext.startForegroundService(intent)
+      } else {
+        reactApplicationContext.startService(intent)
+      }
+    } catch (e: Exception) {
+      // ForegroundServiceStartNotAllowedException (API 31+) or similar — app is
+      // in a state where foreground services cannot be started (background
+      // process limit, power-save mode, etc.). Log and continue without the
+      // foreground service; inference will still work but may be suspended by
+      // the OS if the app goes to background.
+      android.util.Log.w("AiCore", "Could not start InferenceService: ${e.message}")
     }
   }
 
@@ -396,8 +426,8 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   private fun createMediaPipeSession(): LlmInferenceSession {
     val inference = llmInference ?: throw IllegalStateException("LLM not initialized.")
     val opts = LlmInferenceSession.LlmInferenceSessionOptions.builder()
-      .setTemperature(DEFAULT_TEMPERATURE)
-      .setTopK(DEFAULT_TOP_K)
+      .setTemperature(configTemperature)
+      .setTopK(configTopK)
       .build()
     return LlmInferenceSession.createFromOptions(inference, opts)
   }
@@ -417,10 +447,17 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
   }
 
   @OptIn(ExperimentalApi::class)
-  override fun initialize(modelPath: String, promise: Promise) {
+  override fun initialize(modelPath: String, maxContextLength: Double, promise: Promise) {
     mlkitModel = null
     llmInference?.close()
     llmInference = null
+    // Wait for any in-flight LiteRT-LM native call to finish before closing
+    // the engine. Calling close() while a native thread is inside sendMessageAsync
+    // causes a SIGSEGV in LiteRT-LM's C++ layer.
+    val deadline = System.currentTimeMillis() + 5_000L
+    while (inferenceInFlight && System.currentTimeMillis() < deadline) {
+      Thread.sleep(50)
+    }
     litertlmConversation?.close()
     litertlmConversation = null
     litertlmEngine?.close()
@@ -481,15 +518,17 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
             // Use CPU backend directly. GPU (OpenCL) is not available on Tensor G4
             // and initialize() does NOT throw — the OpenCL error only surfaces on
             // the first inference call, making GPU→CPU fallback at init impossible.
+            val contextTokens = if (maxContextLength > 0.0) maxContextLength.toInt() else LITERTLM_MAX_TOKENS
             val samplerConfig = SamplerConfig(
-              topK = DEFAULT_TOP_K,
+              topK = configTopK,
               topP = 0.95,
-              temperature = DEFAULT_TEMPERATURE.toDouble(),
+              temperature = configTemperature.toDouble(),
             )
             val cfg = EngineConfig(
               modelPath = resolvedPath,
               backend = Backend.CPU(),
-              maxNumTokens = LITERTLM_MAX_TOKENS,
+              visionBackend = if (configEnableVision) Backend.GPU() else null,
+              maxNumTokens = contextTokens,
               cacheDir = reactApplicationContext.getExternalFilesDir(null)?.absolutePath,
             )
             val engine = Engine(cfg)
@@ -529,6 +568,212 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
 
   override fun generateResponseStateless(prompt: String, promise: Promise) {
     generateResponseInternal(prompt, false, promise)
+  }
+
+  /**
+   * One-shot vision inference: sends [imageBase64] + [prompt] to the LiteRT-LM engine and
+   * returns the full response as a string.
+   *
+   * Requirements:
+   *  - Model must be a multimodal LiteRT-LM model (Gemma 3n or Gemma 4).
+   *  - Engine must have been initialised after calling `configure({ enableVision: true })`.
+   *
+   * [imageBase64] is a standard Base64-encoded PNG/JPEG image (no data-URI prefix needed).
+   * Does NOT read from or write to the conversation history.
+   */
+  @OptIn(ExperimentalApi::class)
+  override fun generateResponseWithImage(prompt: String, imageBase64: String, promise: Promise) {
+    val litertlm = litertlmConversation
+    if (litertlm == null) {
+      promise.reject("NOT_INITIALIZED", "LLM not initialized.")
+      return
+    }
+    if (!configEnableVision) {
+      promise.reject("VISION_NOT_ENABLED",
+        "Vision is not enabled. Call configure({ enableVision: true }) before initialize().")
+      return
+    }
+
+    startInferenceService()
+    cancelRequested = false
+
+    executor.execute {
+      inferenceInFlight = true
+      try {
+        val imageBytes = Base64.decode(imageBase64, Base64.DEFAULT)
+        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+          ?: run {
+            stopInferenceService()
+            promise.reject("INVALID_IMAGE", "Could not decode image from Base64 string.")
+            return@execute
+          }
+        val pngBytes = bitmap.toPngByteArray()
+
+        val contents = Contents.of(listOf(
+          Content.ImageBytes(pngBytes),
+          Content.Text(prompt),
+        ))
+
+        val resultBuilder = StringBuilder()
+        var errorThrowable: Throwable? = null
+        val latch = CountDownLatch(1)
+
+        litertlm.sendMessageAsync(
+          contents,
+          object : MessageCallback {
+            override fun onMessage(message: Message) {
+              if (!cancelRequested) {
+                val text = message.toString()
+                if (text.isNotEmpty()) resultBuilder.append(text)
+              }
+            }
+            override fun onDone() { latch.countDown() }
+            override fun onError(throwable: Throwable) {
+              errorThrowable = throwable
+              latch.countDown()
+            }
+          },
+          emptyMap(),
+        )
+
+        val completed = latch.await(inferenceTimeoutSec, TimeUnit.SECONDS)
+        val err = errorThrowable
+        when {
+          cancelRequested -> {
+            stopInferenceService()
+            promise.reject("CANCELLED", "Generation cancelled.")
+          }
+          !completed -> {
+            stopInferenceService()
+            promise.reject("GENERATION_ERROR", "Vision inference timed out after ${inferenceTimeoutSec}s")
+          }
+          err != null -> {
+            stopInferenceService()
+            promise.reject("GENERATION_ERROR", err.message, err)
+          }
+          else -> {
+            stopInferenceService()
+            promise.resolve(resultBuilder.toString().trim())
+          }
+        }
+      } catch (e: IllegalStateException) {
+        tryResetLitertlmConversation()
+        stopInferenceService()
+        promise.reject("CONVERSATION_RESET", "Model was reinitialized during inference. Please retry.", e)
+      } catch (e: Exception) {
+        stopInferenceService()
+        promise.reject("GENERATION_ERROR", e.message, e)
+      } finally {
+        inferenceInFlight = false
+      }
+    }
+  }
+
+  /**
+   * Streaming vision inference: sends [imageBase64] + [prompt] to the LiteRT-LM engine.
+   * Tokens are emitted via NativeEventEmitter (AICore_streamToken / AICore_streamComplete / AICore_streamError).
+   *
+   * Requirements: same as [generateResponseWithImage].
+   * Does NOT write to conversation history.
+   */
+  @OptIn(ExperimentalApi::class)
+  override fun generateResponseStreamWithImage(prompt: String, imageBase64: String) {
+    val litertlm = litertlmConversation
+    if (litertlm == null) {
+      sendEvent(EVENT_STREAM_ERROR, createErrorMap("NOT_INITIALIZED", "LLM not initialized."))
+      return
+    }
+    if (!configEnableVision) {
+      sendEvent(EVENT_STREAM_ERROR, createErrorMap("VISION_NOT_ENABLED",
+        "Vision is not enabled. Call configure({ enableVision: true }) before initialize()."))
+      return
+    }
+
+    startInferenceService()
+    cancelRequested = false
+
+    // IMPORTANT: Do NOT use executor.execute + CountDownLatch here.
+    // The LiteRT-LM GPU vision backend dispatches sendMessageAsync callbacks on the
+    // SAME thread that called sendMessageAsync (the executor thread). Blocking that
+    // thread with latch.await() creates a deadlock — callbacks can never fire.
+    // Solution: use a coroutine on Dispatchers.IO (a different thread pool) +
+    // suspendCancellableCoroutine so the thread suspends without blocking, and the
+    // GPU callback can resume it from whichever thread it fires on.
+    coroutineScope.launch(Dispatchers.IO) {
+      inferenceInFlight = true
+      try {
+        val imageBytes = Base64.decode(imageBase64, Base64.DEFAULT)
+        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+          ?: run {
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_ERROR, createErrorMap("INVALID_IMAGE", "Could not decode image from Base64 string."))
+            return@launch
+          }
+        val pngBytes = bitmap.toPngByteArray()
+
+        val contents = Contents.of(listOf(
+          Content.ImageBytes(pngBytes),
+          Content.Text(prompt),
+        ))
+
+        try {
+          suspendCancellableCoroutine<Unit> { continuation ->
+            litertlm.sendMessageAsync(
+              contents,
+              object : MessageCallback {
+                override fun onMessage(message: Message) {
+                  if (!cancelRequested) {
+                    val token = message.toString()
+                    if (token.isNotEmpty()) emitStreamToken(token, false)
+                  }
+                }
+                override fun onDone() {
+                  if (continuation.isActive) continuation.resume(Unit)
+                }
+                override fun onError(throwable: Throwable) {
+                  if (continuation.isActive) continuation.resumeWithException(throwable)
+                }
+              },
+              emptyMap(),
+            )
+            continuation.invokeOnCancellation {
+              litertlm.cancelProcess()
+            }
+          }
+          // suspendCancellableCoroutine returned normally → onDone fired
+          emitStreamToken("", true)
+          stopInferenceService()
+          sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
+        } catch (e: Exception) {
+          // onError fired or coroutine was cancelled
+          if (cancelRequested) {
+            emitStreamToken("", true)
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
+          } else {
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", e.message ?: "Vision inference error"))
+          }
+        }
+      } catch (e: IllegalStateException) {
+        tryResetLitertlmConversation()
+        stopInferenceService()
+        sendEvent(EVENT_STREAM_ERROR, createErrorMap("CONVERSATION_RESET",
+          "Model was reinitialized during inference. Please retry."))
+      } catch (e: Exception) {
+        stopInferenceService()
+        sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", e.message ?: "Error"))
+      } finally {
+        inferenceInFlight = false
+      }
+    }
+  }
+
+  /** Converts a Bitmap to a PNG byte array (Gallery pattern). */
+  private fun Bitmap.toPngByteArray(): ByteArray {
+    val stream = ByteArrayOutputStream()
+    this.compress(Bitmap.CompressFormat.PNG, 100, stream)
+    return stream.toByteArray()
   }
 
   private fun generateResponseInternal(
@@ -585,7 +830,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
             if (
               useConversationHistory &&
               shouldContinueResponse(visible) &&
-              continuations < MAX_CONTINUATIONS
+              continuations < configMaxContinuations
             ) {
               currentPrompt = buildContinuationPrompt(prompt, visible)
               continuations++
@@ -633,53 +878,80 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
         }
       }
       litertlm != null -> executor.execute {
-        val resultBuilder = StringBuilder()
-        var errorThrowable: Throwable? = null
-        val latch = CountDownLatch(1)
-        litertlm.sendMessageAsync(
-          Contents.of(listOf(Content.Text(prompt))),
-          object : MessageCallback {
-            override fun onMessage(message: Message) {
-              if (!cancelRequested) {
-                val text = message.contents.contents
-                  .filterIsInstance<Content.Text>()
-                  .joinToString("") { it.text }
-                resultBuilder.append(text)
+        inferenceInFlight = true
+        try {
+          val resultBuilder = StringBuilder()
+          var errorThrowable: Throwable? = null
+          val latch = CountDownLatch(1)
+          litertlm.sendMessageAsync(
+            Contents.of(listOf(Content.Text(prompt))),
+            object : MessageCallback {
+              override fun onMessage(message: Message) {
+                if (!cancelRequested) {
+                  val text = message.toString()
+                  if (text.isNotEmpty()) {
+                    resultBuilder.append(text)
+                    sendEvent(EVENT_STATELESS_TOKEN, Arguments.createMap().apply {
+                      putString("token", text)
+                    })
+                  }
+                }
+              }
+              override fun onDone() { latch.countDown() }
+              override fun onError(throwable: Throwable) {
+                errorThrowable = throwable
+                latch.countDown()
+              }
+            },
+            emptyMap(),
+          )
+          val completed = latch.await(inferenceTimeoutSec, TimeUnit.SECONDS)
+          val err = errorThrowable
+          when {
+            cancelRequested -> {
+              stopInferenceService()
+              promise.reject("CANCELLED", "Generation cancelled.")
+            }
+            !completed -> {
+              stopInferenceService()
+              promise.reject("GENERATION_ERROR", "Inference timed out after ${inferenceTimeoutSec}s")
+            }
+            err != null -> {
+              val isContextError = err.message?.contains("context", ignoreCase = true) == true ||
+                  err.message?.contains("token", ignoreCase = true) == true ||
+                  err.message?.contains("exceed", ignoreCase = true) == true ||
+                  err.message?.contains("out of range", ignoreCase = true) == true
+              if (isContextError) {
+                tryResetLitertlmConversation()
+                stopInferenceService()
+                promise.reject(
+                  "CONTEXT_LIMIT_EXCEEDED",
+                  "Prompt is too long for the model's context window. " +
+                    "Reduce the prompt length and try again. (${err.message})",
+                  err
+                )
+              } else {
+                stopInferenceService()
+                promise.reject("GENERATION_ERROR", err.message, err)
               }
             }
-            override fun onDone() { latch.countDown() }
-            override fun onError(throwable: Throwable) {
-              errorThrowable = throwable
-              latch.countDown()
+            else -> {
+              val full = resultBuilder.toString().trim()
+              stopInferenceService()
+              promise.resolve(full)
             }
-          },
-          emptyMap(),
-        )
-        val completed = latch.await(INFERENCE_TIMEOUT_SEC, TimeUnit.SECONDS)
-        val err = errorThrowable
-        when {
-          cancelRequested -> {
-            stopInferenceService()
-            promise.reject("CANCELLED", "Generation cancelled.")
           }
-          !completed -> {
-            stopInferenceService()
-            promise.reject("GENERATION_ERROR", "Inference timed out after ${INFERENCE_TIMEOUT_SEC}s")
-          }
-          err != null -> {
-            if (err.message?.contains("context", ignoreCase = true) == true ||
-                err.message?.contains("token", ignoreCase = true) == true ||
-                err.message?.contains("exceed", ignoreCase = true) == true) {
-              tryResetLitertlmConversation()
-            }
-            stopInferenceService()
-            promise.reject("GENERATION_ERROR", err.message, err)
-          }
-          else -> {
-            val full = resultBuilder.toString().trim()
-            stopInferenceService()
-            promise.resolve(full)
-          }
+        } catch (e: IllegalStateException) {
+          // Conversation was closed (e.g. by a concurrent initialize/release) between
+          // the time this task was enqueued and when it actually ran. Reset and report.
+          tryResetLitertlmConversation()
+          stopInferenceService()
+          promise.reject("CONVERSATION_RESET", "Model was reinitialized during inference. Please retry.", e)
+        } catch (e: Exception) {
+          stopInferenceService()
+          promise.reject("GENERATION_ERROR", e.message, e)
+        } finally {
+          inferenceInFlight = false
         }
       }
       else -> promise.reject("NOT_INITIALIZED", "LLM not initialized.")
@@ -759,7 +1031,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
             }
 
             idleRetries = 0
-            if (shouldContinueResponse(total.toString()) && continuations < MAX_CONTINUATIONS) {
+            if (shouldContinueResponse(total.toString()) && continuations < configMaxContinuations) {
               currentPrompt = buildContinuationPrompt(prompt, total.toString())
               continuations++
               continuationJoinPending = true
@@ -803,12 +1075,12 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
               latch.countDown()
             }
           })
-          val streamCompleted = latch.await(INFERENCE_TIMEOUT_SEC, TimeUnit.SECONDS)
+          val streamCompleted = latch.await(inferenceTimeoutSec, TimeUnit.SECONDS)
           session?.close()
           session = null
           if (!streamCompleted) {
             stopInferenceService()
-            sendEvent(EVENT_STREAM_ERROR, createErrorMap("TIMEOUT", "MediaPipe stream timed out after ${INFERENCE_TIMEOUT_SEC}s"))
+            sendEvent(EVENT_STREAM_ERROR, createErrorMap("TIMEOUT", "MediaPipe stream timed out after ${inferenceTimeoutSec}s"))
             return@execute
           }
           if (!cancelRequested) saveToHistory(prompt, total.toString().trim())
@@ -828,52 +1100,72 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
         }
       }
       litertlm != null -> executor.execute {
-        val total = StringBuilder()
-        val latch = CountDownLatch(1)
-        var errorMsg: String? = null
-        litertlm.sendMessageAsync(
-          Contents.of(listOf(Content.Text(prompt))),
-          object : MessageCallback {
-            override fun onMessage(message: Message) {
-              if (!cancelRequested) {
-                val token = message.contents.contents
-                  .filterIsInstance<Content.Text>()
-                  .joinToString("") { it.text }
-                if (token.isNotEmpty()) {
-                  total.append(token)
-                  emitStreamToken(token, false)
+        inferenceInFlight = true
+        try {
+          val total = StringBuilder()
+          val latch = CountDownLatch(1)
+          var errorMsg: String? = null
+          litertlm.sendMessageAsync(
+            Contents.of(listOf(Content.Text(prompt))),
+            object : MessageCallback {
+              override fun onMessage(message: Message) {
+                if (!cancelRequested) {
+                  val token = message.toString()
+                  if (token.isNotEmpty()) {
+                    total.append(token)
+                    emitStreamToken(token, false)
+                  }
                 }
               }
+              override fun onDone() { latch.countDown() }
+              override fun onError(throwable: Throwable) {
+                errorMsg = throwable.message
+                latch.countDown()
+              }
+            },
+            emptyMap(),
+          )
+          val streamCompleted = latch.await(inferenceTimeoutSec, TimeUnit.SECONDS)
+          if (cancelRequested) {
+            emitStreamToken("", true)
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
+          } else if (!streamCompleted) {
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", "Inference timed out after ${inferenceTimeoutSec}s"))
+          } else if (errorMsg != null) {
+            // If context window is full, reset conversation and report a clear error
+            val isContextError = errorMsg!!.contains("context", ignoreCase = true) ||
+                errorMsg!!.contains("token", ignoreCase = true) ||
+                errorMsg!!.contains("exceed", ignoreCase = true) ||
+                errorMsg!!.contains("out of range", ignoreCase = true)
+            if (isContextError) {
+              tryResetLitertlmConversation()
+              stopInferenceService()
+              sendEvent(EVENT_STREAM_ERROR, createErrorMap(
+                "CONTEXT_LIMIT_EXCEEDED",
+                "Prompt is too long for the model's context window. " +
+                  "Reduce the prompt length and try again. (${errorMsg})"
+              ))
+            } else {
+              stopInferenceService()
+              sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", errorMsg ?: "Error"))
             }
-            override fun onDone() { latch.countDown() }
-            override fun onError(throwable: Throwable) {
-              errorMsg = throwable.message
-              latch.countDown()
-            }
-          },
-          emptyMap(),
-        )
-        val streamCompleted = latch.await(INFERENCE_TIMEOUT_SEC, TimeUnit.SECONDS)
-        if (cancelRequested) {
-          emitStreamToken("", true)
-          stopInferenceService()
-          sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
-        } else if (!streamCompleted) {
-          stopInferenceService()
-          sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", "Inference timed out after ${INFERENCE_TIMEOUT_SEC}s"))
-        } else if (errorMsg != null) {
-          // If context window is full, silently reset conversation and report error
-          if (errorMsg!!.contains("context", ignoreCase = true) ||
-              errorMsg!!.contains("token", ignoreCase = true) ||
-              errorMsg!!.contains("exceed", ignoreCase = true)) {
-            tryResetLitertlmConversation()
+          } else {
+            emitStreamToken("", true)
+            stopInferenceService()
+            sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
           }
+        } catch (e: IllegalStateException) {
+          // Conversation was closed concurrently (initialize/release race). Reset and report.
+          tryResetLitertlmConversation()
           stopInferenceService()
-          sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", errorMsg ?: "Error"))
-        } else {
-          emitStreamToken("", true)
+          sendEvent(EVENT_STREAM_ERROR, createErrorMap("CONVERSATION_RESET", "Model was reinitialized during inference. Please retry."))
+        } catch (e: Exception) {
           stopInferenceService()
-          sendEvent(EVENT_STREAM_COMPLETE, Arguments.createMap())
+          sendEvent(EVENT_STREAM_ERROR, createErrorMap("STREAM_ERROR", e.message ?: "Error"))
+        } finally {
+          inferenceInFlight = false
         }
       }
       else -> sendEvent(EVENT_STREAM_ERROR, createErrorMap("NOT_INITIALIZED", "LLM not initialized."))
@@ -936,9 +1228,9 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
         litertlmConversation = engine.createConversation(
           ConversationConfig(
             samplerConfig = SamplerConfig(
-              topK = DEFAULT_TOP_K,
+              topK = configTopK,
               topP = 0.95,
-              temperature = DEFAULT_TEMPERATURE.toDouble(),
+              temperature = configTemperature.toDouble(),
             )
           )
         )
@@ -954,7 +1246,7 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
       litertlmConversation?.close()
       litertlmConversation = engine.createConversation(
         ConversationConfig(
-          samplerConfig = SamplerConfig(topK = DEFAULT_TOP_K, topP = 0.95, temperature = DEFAULT_TEMPERATURE.toDouble())
+          samplerConfig = SamplerConfig(topK = configTopK, topP = 0.95, temperature = configTemperature.toDouble())
         )
       )
       resetHistory()
@@ -962,6 +1254,46 @@ class AiCoreModule(reactContext: ReactApplicationContext) :
     } catch (e: Exception) {
       android.util.Log.e("AiCore", "LiteRT-LM: failed to reset conversation: ${e.message}")
     }
+  }
+
+  /**
+   * Updates runtime-configurable inference parameters.
+   * Pass -1 (or any negative value) for any parameter to keep its current value.
+   *
+   * @param inferenceTimeoutSec  Seconds before inference is aborted. Range [30, 3600]. Default 420.
+   * @param temperature          Sampling temperature [0.0, 2.0]. Default 0.7.
+   *                             Applies to LiteRT-LM on the NEXT conversation reset or initialize.
+   * @param topK                 Top-K sampling [1, 256]. Default 64.
+   *                             Applies to LiteRT-LM on the NEXT conversation reset or initialize.
+   * @param maxContinuations     Max MLKit continuation passes [0, 50]. Default 12.
+   * @param enableVision         0 = disable, 1 = enable, -1 = keep current.
+   *                             Requires a multimodal model (Gemma 3n / Gemma 4).
+   *                             Takes effect on the NEXT initialize() call.
+   */
+  override fun configure(
+    inferenceTimeoutSec: Double,
+    temperature: Double,
+    topK: Double,
+    maxContinuations: Double,
+    enableVision: Double,
+    promise: Promise,
+  ) {
+    if (inferenceTimeoutSec >= 1.0) {
+      this.inferenceTimeoutSec = inferenceTimeoutSec.toLong().coerceIn(30L, 3600L)
+    }
+    if (temperature >= 0.0) {
+      this.configTemperature = temperature.toFloat().coerceIn(0f, 2f)
+    }
+    if (topK >= 1.0) {
+      this.configTopK = topK.toInt().coerceIn(1, 256)
+    }
+    if (maxContinuations >= 0.0) {
+      this.configMaxContinuations = maxContinuations.toInt().coerceIn(0, 50)
+    }
+    if (enableVision >= 0.0) {
+      this.configEnableVision = enableVision > 0.5
+    }
+    promise.resolve(null)
   }
 
   override fun cancelGeneration(promise: Promise) {

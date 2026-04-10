@@ -33,6 +33,8 @@ import AICore, {
 } from 'react-native-ai-core';
 import * as SecureStore from 'expo-secure-store';
 import { InitTab } from './components/InitTab';
+import { LocalAITab } from './components/LocalAITab';
+import { VisionTab } from './components/VisionTab';
 
 const HF_TOKEN_KEY = 'hf_token';
 
@@ -54,7 +56,7 @@ const C = {
   dangerDim: '#450a0a',
 };
 
-type Tab = 'chat' | 'models' | 'init';
+type Tab = 'chat' | 'models' | 'init' | 'local' | 'vision';
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
@@ -724,19 +726,39 @@ export default function App() {
             renderChatTab()
           ) : tab === 'init' ? (
             <InitTab hfToken={hfToken} />
+          ) : tab === 'local' ? (
+            <LocalAITab hfToken={hfToken} />
+          ) : tab === 'vision' ? (
+            <VisionTab hfToken={hfToken} />
           ) : (
             renderModelsTab()
           )}
         </View>
       </KeyboardAvoidingView>
       <View style={[s.tabBar, { paddingBottom: Math.max(8, insets.bottom) }]}>
-        {(['chat', 'models', 'init'] as Tab[]).map((t) => (
+        {(['chat', 'models', 'vision', 'local', 'init'] as Tab[]).map((t) => (
           <Pressable key={t} style={s.tabBtn} onPress={() => setTab(t)}>
             <Text style={[s.tabIcon, tab === t && s.tabIconOn]}>
-              {t === 'chat' ? '💬' : t === 'models' ? '🤖' : '⚗️'}
+              {t === 'chat'
+                ? '💬'
+                : t === 'models'
+                  ? '🤖'
+                  : t === 'vision'
+                    ? '🔍'
+                    : t === 'local'
+                      ? '🏠'
+                      : '⚗️'}
             </Text>
             <Text style={[s.tabLabel, tab === t && s.tabLabelOn]}>
-              {t === 'chat' ? 'Chat' : t === 'models' ? 'Models' : 'Init'}
+              {t === 'chat'
+                ? 'Chat'
+                : t === 'models'
+                  ? 'Models'
+                  : t === 'vision'
+                    ? 'Vision'
+                    : t === 'local'
+                      ? 'Local AI'
+                      : 'Init'}
             </Text>
           </Pressable>
         ))}

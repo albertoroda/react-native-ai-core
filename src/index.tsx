@@ -57,6 +57,7 @@ const EVENT_STREAM_TOKEN = 'AICore_streamToken';
 const EVENT_STREAM_COMPLETE = 'AICore_streamComplete';
 const EVENT_STREAM_ERROR = 'AICore_streamError';
 const EVENT_DOWNLOAD_PROGRESS = 'AICore_downloadProgress';
+const EVENT_STATELESS_TOKEN = 'AICore_statelessToken';
 
 const emitter =
   NativeAiCore != null ? new NativeEventEmitter(NativeAiCore) : null;
@@ -86,9 +87,12 @@ function assertAvailable(): void {
  * @example
  * const ok = await initialize('/data/local/tmp/gemini-nano.bin');
  */
-export async function initialize(modelPath: string): Promise<boolean> {
+export async function initialize(
+  modelPath: string,
+  maxContextLength = 4096
+): Promise<boolean> {
   assertAvailable();
-  return NativeAiCore!.initialize(modelPath);
+  return NativeAiCore!.initialize(modelPath, maxContextLength);
 }
 
 /**
@@ -229,6 +233,156 @@ export async function cancelGeneration(): Promise<void> {
   return NativeAiCore.cancelGeneration();
 }
 
+// ── Runtime inference configuration ──────────────────────────────────────────
+
+/**
+ * Runtime-configurable inference parameters.
+ * Any field omitted (or set to -1) keeps its current value.
+ */
+export interface AICoreConfig {
+  /**
+   * Seconds before inference is aborted. Range: 30–3600. Default: 420 (7 min).
+   * Increase this if you get timeout errors for long responses.
+   */
+  inferenceTimeoutSec?: number;
+  /**
+   * Sampling temperature in [0.0, 2.0]. Default: 0.7.
+   * Higher values → more creative; lower → more deterministic.
+   * For LiteRT-LM: takes effect on the next `resetConversation()` or `initialize()`.
+   */
+  temperature?: number;
+  /**
+   * Top-K sampling value in [1, 256]. Default: 64.
+   * For LiteRT-LM: takes effect on the next `resetConversation()` or `initialize()`.
+   */
+  topK?: number;
+  /**
+   * Maximum MLKit continuation passes in [0, 50]. Default: 12.
+   * Only relevant for the `aicore` (Gemini Nano) engine.
+   */
+  maxContinuations?: number;
+  /**
+   * Enable multimodal (vision/image) support for LiteRT-LM.
+   * Requires a multimodal model: **Gemma 3n** or **Gemma 4**.
+   *
+   * Must be set BEFORE calling `initialize()` — it activates a GPU vision backend
+   * in the engine configuration. Setting it after initialize has no effect until
+   * you call `initialize()` again.
+   *
+   * Once enabled, use `generateResponseWithImage()` or `generateResponseStreamWithImage()`
+   * to send image + text prompts to the model.
+   */
+  enableVision?: boolean;
+}
+
+/**
+ * Updates runtime inference parameters without reinitialising the engine.
+ *
+ * @example
+ * // Increase timeout for long document summarisation
+ * await AICore.configure({ inferenceTimeoutSec: 900 });
+ *
+ * // More creative outputs
+ * await AICore.configure({ temperature: 1.2, topK: 80 });
+ */
+export async function configure(options: AICoreConfig): Promise<void> {
+  assertAvailable();
+  return NativeAiCore!.configure(
+    options.inferenceTimeoutSec ?? -1,
+    options.temperature ?? -1,
+    options.topK ?? -1,
+    options.maxContinuations ?? -1,
+    options.enableVision === undefined ? -1 : options.enableVision ? 1 : 0
+  );
+}
+
+// ── Vision / multimodal inference ────────────────────────────────────────────
+
+/**
+ * Sends a Base64-encoded image and a text prompt to the LiteRT-LM engine
+ * and returns the full response as a string (non-streaming).
+ *
+ * **Prerequisites:**
+ * 1. Call `configure({ enableVision: true })` **before** `initialize()`.
+ * 2. Use a multimodal model (e.g. `KnownModel.GEMMA3N_2B` or `KnownModel.GEMMA4_2B`).
+ *
+ * @param imageBase64  Plain Base64 string of a PNG or JPEG image.
+ *                     Strip any `data:image/...;base64,` prefix before passing.
+ * @param prompt       Text instruction to accompany the image.
+ *
+ * @example
+ * // Pick an image with expo-image-picker and convert to base64
+ * const result = await ImagePicker.launchImageLibraryAsync({ base64: true });
+ * const base64 = result.assets[0].base64!;
+ *
+ * const answer = await AICore.generateResponseWithImage(
+ *   base64,
+ *   'What is in this image?'
+ * );
+ */
+export async function generateResponseWithImage(
+  imageBase64: string,
+  prompt: string
+): Promise<string> {
+  assertAvailable();
+  return NativeAiCore!.generateResponseWithImage(prompt, imageBase64);
+}
+
+/**
+ * Streaming variant of `generateResponseWithImage`.
+ * Tokens are delivered in real time through the same `StreamCallbacks`
+ * used by `generateResponseStream`.
+ *
+ * Same prerequisites as `generateResponseWithImage`.
+ *
+ * @returns Cleanup function — call it to remove the event subscriptions.
+ *
+ * @example
+ * const unsubscribe = AICore.generateResponseStreamWithImage(
+ *   base64,
+ *   'Describe this image in detail.',
+ *   {
+ *     onToken:    (token, done) => process(token),
+ *     onComplete: ()            => console.log('Done'),
+ *     onError:    (err)         => console.error(err),
+ *   }
+ * );
+ */
+export function generateResponseStreamWithImage(
+  imageBase64: string,
+  prompt: string,
+  callbacks: StreamCallbacks
+): () => void {
+  if (!NativeAiCore || !emitter) {
+    callbacks.onError({
+      code: 'UNAVAILABLE',
+      message: `react-native-ai-core is not available on ${Platform.OS}.`,
+    });
+    return () => {};
+  }
+
+  const tokenSub = emitter.addListener(EVENT_STREAM_TOKEN, (event: any) => {
+    callbacks.onToken(
+      (event as { token: string; done: boolean }).token,
+      (event as { token: string; done: boolean }).done
+    );
+  });
+  const completeSub = emitter.addListener(EVENT_STREAM_COMPLETE, () => {
+    callbacks.onComplete();
+  });
+  const errorSub = emitter.addListener(EVENT_STREAM_ERROR, (error: any) => {
+    callbacks.onError(error as AIError);
+  });
+
+  NativeAiCore.generateResponseStreamWithImage(prompt, imageBase64);
+
+  return () => {
+    tokenSub.remove();
+    completeSub.remove();
+    errorSub.remove();
+  };
+}
+
 // ── Engine enum ──────────────────────────────────────────────────────────────
 
 /**
@@ -269,6 +423,21 @@ export interface KnownModelEntry {
    * Leave `undefined` for models that are not in the catalog (e.g. AICORE).
    */
   catalogName?: string;
+  /**
+   * Maximum context window in tokens (input + output combined).
+   * Used to configure the native KV cache at initialisation time.
+   * Defaults to 4096 if not specified.
+   */
+  maxContextLength?: number;
+  /**
+   * Whether this model supports image input (vision/multimodal).
+   * When `true`, the model can be used with
+   * `generateResponseWithImage` / `generateResponseStreamWithImage`
+   * after calling `configure({ enableVision: true })` before `initialize()`.
+   *
+   * Currently `true` for: Gemma 3n (E2B/E4B) and Gemma 4 (E2B/E4B).
+   */
+  supportsVision?: boolean;
 }
 
 /**
@@ -293,6 +462,8 @@ export const KnownModel = {
     modelId: 'litert-community/gemma-4-E2B-it-litert-lm',
     catalogName: 'Gemma-4-E2B-it',
     sizeGb: 2.4,
+    maxContextLength: 32000,
+    supportsVision: true,
   },
   /** Gemma 4 E4B Instruct — LiteRT-LM backend (~3.4 GB). */
   GEMMA4_4B: {
@@ -301,6 +472,8 @@ export const KnownModel = {
     modelId: 'litert-community/gemma-4-E4B-it-litert-lm',
     catalogName: 'Gemma-4-E4B-it',
     sizeGb: 3.4,
+    maxContextLength: 32000,
+    supportsVision: true,
   },
   /** Gemma 3n E2B Instruct — LiteRT-LM backend (~3.4 GB). Multimodal (text/image/audio). */
   GEMMA3N_2B: {
@@ -309,6 +482,7 @@ export const KnownModel = {
     modelId: 'google/gemma-3n-E2B-it-litert-lm',
     catalogName: 'Gemma-3n-E2B-it',
     sizeGb: 3.4,
+    supportsVision: true,
   },
   /** Gemma 3n E4B Instruct — LiteRT-LM backend (~4.6 GB). Multimodal (text/image/audio). */
   GEMMA3N_4B: {
@@ -317,6 +491,7 @@ export const KnownModel = {
     modelId: 'google/gemma-3n-E4B-it-litert-lm',
     catalogName: 'Gemma-3n-E4B-it',
     sizeGb: 4.6,
+    supportsVision: true,
   },
   /** Gemma 3 1B Instruct — LiteRT-LM backend (~0.55 GB). Fast, low-memory. */
   GEMMA3_1B: {
@@ -345,6 +520,17 @@ export const KnownModel = {
 } as const satisfies Record<string, KnownModelEntry>;
 
 export type KnownModelKey = keyof typeof KnownModel;
+
+/**
+ * Subset of `KnownModel` entries that support image/vision inference.
+ * All entries have `supportsVision: true` and use the LiteRT-LM engine.
+ *
+ * Use with `configure({ enableVision: true })` + `ensureModel()` before
+ * calling `generateResponseWithImage` or `generateResponseStreamWithImage`.
+ */
+export const visionModels: KnownModelEntry[] = Object.values(
+  KnownModel as Record<string, KnownModelEntry>
+).filter((m) => m.supportsVision === true);
 
 // ── Model-state helpers ───────────────────────────────────────────────────────
 
@@ -460,7 +646,7 @@ export async function ensureModel(
   }
 
   onStatus?.('initializing');
-  await initialize(modelPath);
+  await initialize(modelPath, model.maxContextLength ?? 4096);
 }
 
 // ── System prompt ─────────────────────────────────────────────────────────────
@@ -531,21 +717,32 @@ export async function generateResponseStateless(
   return NativeAiCore!.generateResponseStateless(prompt);
 }
 
+/**
+ * Subscribes to individual tokens emitted during a `generateResponseStateless`
+ * call. Useful for real-time parsing of structured JSON responses (e.g.
+ * detecting when a nested object is complete before the full response arrives).
+ *
+ * @param onToken  Called for each token fragment received from the model.
+ * @returns        Cleanup function — call it to remove the subscription.
+ *
+ * @example
+ * const unsub = subscribeToStatelessTokens((t) => accumulated += t);
+ * await generateResponseStateless(prompt);
+ * unsub();
+ */
+export function subscribeToStatelessTokens(
+  onToken: (token: string) => void
+): () => void {
+  if (!emitter) return () => {};
+  const sub = emitter.addListener(EVENT_STATELESS_TOKEN, (event: any) =>
+    onToken((event as { token: string }).token)
+  );
+  return () => sub.remove();
+}
+
 // ── Model download API ────────────────────────────────────────────────────────
 
-// Catalog versions bundled locally — no network required.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const CATALOG_MAP: Record<string, { models?: ModelCatalogEntry[] }> = {
-  '1_0_4':     require('../model_allowlists/1_0_4.json'),
-  '1_0_5':     require('../model_allowlists/1_0_5.json'),
-  '1_0_6':     require('../model_allowlists/1_0_6.json'),
-  '1_0_7':     require('../model_allowlists/1_0_7.json'),
-  '1_0_8':     require('../model_allowlists/1_0_8.json'),
-  '1_0_9':     require('../model_allowlists/1_0_9.json'),
-  '1_0_10':    require('../model_allowlists/1_0_10.json'),
-  '1_0_11':    require('../model_allowlists/1_0_11.json'),
-  'ios_1_0_0': require('../model_allowlists/ios_1_0_0.json'),
-};
+import { CATALOG_MAP } from './model-catalog-data';
 
 /** An entry from the Google AI Edge model catalog. */
 export interface ModelCatalogEntry {
@@ -670,6 +867,7 @@ const AICore = {
   generateResponse,
   generateResponseStream,
   generateResponseStateless,
+  subscribeToStatelessTokens,
   generateStructuredResponse,
   checkAvailability,
   release,
@@ -691,3 +889,7 @@ const AICore = {
 };
 
 export default AICore;
+
+// ── Markdown renderer ─────────────────────────────────────────────────────────
+export { AICoreMarkdown } from './AICoreMarkdown';
+export type { AICoreMarkdownProps } from './AICoreMarkdown';
