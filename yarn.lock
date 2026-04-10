@@ -5918,6 +5918,26 @@ __metadata:
   languageName: node
   linkType: hard
 
+"expo-image-loader@npm:~6.0.0":
+  version: 6.0.0
+  resolution: "expo-image-loader@npm:6.0.0"
+  peerDependencies:
+    expo: "*"
+  checksum: 10c0/36f1e80d2b3d2a1cce440c7d938cd3cf3138f2b1fa706a1954e415bfae87b5b8eeaec65be0ab17880eb7585dd28c9225d056ebdb98ac81e0ffbfe880d952b0eb
+  languageName: node
+  linkType: hard
+
+"expo-image-picker@npm:~17.0.10":
+  version: 17.0.10
+  resolution: "expo-image-picker@npm:17.0.10"
+  dependencies:
+    expo-image-loader: "npm:~6.0.0"
+  peerDependencies:
+    expo: "*"
+  checksum: 10c0/d05ed6ce53463acc86af062df33a648aaafb27549f875ebf907f0f438c09727ae9b75fb8c333fdcaceb0249d9de16929d2cd65ba81f256403745a30af9a7f8c3
+  languageName: node
+  linkType: hard
+
 "expo-json-utils@npm:~0.15.0":
   version: 0.15.0
   resolution: "expo-json-utils@npm:0.15.0"
@@ -9821,6 +9841,7 @@ __metadata:
     "@expo/metro-runtime": "npm:~6.1.2"
     expo: "npm:~54.0.33"
     expo-dev-client: "npm:~6.0.20"
+    expo-image-picker: "npm:~17.0.10"
     expo-secure-store: "npm:~15.0.8"
     expo-status-bar: "npm:~3.0.9"
     react: "npm:19.1.0"
@@ -9857,10 +9878,14 @@ __metadata:
     release-it: "npm:^19.2.4"
     turbo: "npm:^2.8.21"
     typescript: "npm:^6.0.2"
-    zod: "npm:^3.24.1"
+    zod: "npm:^4"
   peerDependencies:
     react: "*"
     react-native: "*"
+    zod: ^4
+  peerDependenciesMeta:
+    zod:
+      optional: false
   languageName: unknown
   linkType: soft
 
@@ -12003,14 +12028,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"zod@npm:^3.24.1":
-  version: 3.25.76
-  resolution: "zod@npm:3.25.76"
-  checksum: 10c0/5718ec35e3c40b600316c5b4c5e4976f7fee68151bc8f8d90ec18a469be9571f072e1bbaace10f1e85cf8892ea12d90821b200e980ab46916a6166a4260a983c
-  languageName: node
-  linkType: hard
-
-"zod@npm:^3.25.0 || ^4.0.0":
+"zod@npm:^3.25.0 || ^4.0.0, zod@npm:^4":
   version: 4.3.6
   resolution: "zod@npm:4.3.6"
   checksum: 10c0/860d25a81ab41d33aa25f8d0d07b091a04acb426e605f396227a796e9e800c44723ed96d0f53a512b57be3d1520f45bf69c0cb3b378a232a00787a2609625307

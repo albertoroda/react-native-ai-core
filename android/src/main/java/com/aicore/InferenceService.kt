@@ -30,6 +30,17 @@ class InferenceService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureNotificationChannel()
+        // Call startForeground() immediately in onCreate() so Android's 5-second
+        // timer does not fire before onStartCommand() is reached (which can happen
+        // when the main thread is busy loading the model or the system is under
+        // memory pressure). A second startForeground() call in onStartCommand()
+        // is harmless — Android simply updates the notification.
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

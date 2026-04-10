@@ -148,12 +148,16 @@ export function useAICore(
             }
           },
           onComplete: () => {
+            unsubscribeStream.current?.();
+            unsubscribeStream.current = null;
             updateMessage(assistantId, { streaming: false });
             setIsStreaming(false);
             setEngineStatus('ready');
             streamingMsgId.current = null;
           },
           onError: (err: AIError) => {
+            unsubscribeStream.current?.();
+            unsubscribeStream.current = null;
             updateMessage(assistantId, {
               content: `[Error: ${err.message}]`,
               streaming: false,

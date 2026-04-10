@@ -32,6 +32,21 @@ export interface StructuredGenerateOptions<
    * When aborted, the promise rejects with an Error whose `name` is `'AbortError'`.
    */
   signal?: AbortSignal;
+  /**
+   * Hint for how many items each array in the schema is expected to produce.
+   * Used by the complexity estimator when `strategy = 'chunked'`.
+   * Lower values produce a more accurate estimate for small arrays and avoid
+   * false-positive "schema too complex" errors.
+   * Defaults to 5.
+   */
+  estimatedArraySize?: number;
+  /**
+   * Override the maximum number of estimated model calls allowed before
+   * `strategy = 'chunked'` throws a complexity error.
+   * Increase this only when you are sure the device has enough memory.
+   * Defaults to 150.
+   */
+  maxChunkedCalls?: number;
 }
 
 export interface StructuredValidationIssue {
@@ -59,6 +74,9 @@ const STRUCTURED_PROMPT_BUDGET = 2600;
 const STRUCTURED_REPAIR_RESPONSE_BUDGET = 1200;
 const STRUCTURED_ISSUES_BUDGET = 600;
 const STRUCTURED_CONTINUATION_BUDGET = 1400;
+// Safety guard: throw before starting if the schema would require too many
+// native calls — each call holds the model locked and accumulates RAM.
+const MAX_ESTIMATED_CHUNKED_CALLS = 150;
 const DEFAULT_MAX_STRUCTURED_CONTINUATIONS = 8;
 const CONTINUATION_OVERLAP_WINDOW = 160;
 const DEFAULT_STRUCTURED_TIMEOUT_MS = 300000; // 5 min default
@@ -151,6 +169,37 @@ function stringifyInput(value: unknown, maxChars: number): string {
   return truncateStart(JSON.stringify(value, null, 2), maxChars);
 }
 
+/**
+ * Estimates the number of native model calls needed for chunked generation.
+ * Counted recursively over the schema tree.
+ */
+function estimateChunkedCalls(schema: ZodTypeAny, arrayCountHint = 5): number {
+  const inner = unwrapModifiers(schema);
+
+  if (isLeafSchema(inner)) return 1;
+
+  if (inner instanceof z.ZodArray) {
+    const elementSchema = unwrapModifiers(
+      (inner as z.ZodArray<ZodTypeAny>).element as ZodTypeAny
+    );
+    // +1 for askArrayCount
+    return (
+      1 + arrayCountHint * estimateChunkedCalls(elementSchema, arrayCountHint)
+    );
+  }
+
+  if (inner instanceof z.ZodObject) {
+    const shape = (inner as z.ZodObject<z.ZodRawShape>).shape;
+    return Object.values(shape).reduce(
+      (sum, fieldSchema) =>
+        sum + estimateChunkedCalls(fieldSchema as ZodTypeAny, arrayCountHint),
+      0
+    );
+  }
+
+  return 1;
+}
+
 function fitStructuredPrompt(parts: string[]): string {
   return truncateStart(
     parts.filter(Boolean).join('\n'),
@@ -166,13 +215,18 @@ function fitContinuationPrompt(parts: string[]): string {
 }
 
 function zodTypeToDescription(schema: ZodTypeAny): string {
+  if (schema instanceof z.ZodDefault) {
+    return zodTypeToDescription(
+      (schema as z.ZodDefault<ZodTypeAny>).removeDefault() as ZodTypeAny
+    );
+  }
   if (schema instanceof z.ZodString) return 'string';
   if (schema instanceof z.ZodNumber) return 'number';
   if (schema instanceof z.ZodBoolean) return 'boolean';
   if (schema instanceof z.ZodNull) return 'null';
   if (schema instanceof z.ZodEnum) {
     return `enum(${schema.options
-      .map((value: string) => JSON.stringify(value))
+      .map((value: unknown) => JSON.stringify(value))
       .join(', ')})`;
   }
   if (schema instanceof z.ZodLiteral) {
@@ -639,6 +693,11 @@ function unwrapModifiers(schema: ZodTypeAny): ZodTypeAny {
   if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) {
     return unwrapModifiers(schema.unwrap() as ZodTypeAny);
   }
+  if (schema instanceof z.ZodDefault) {
+    return unwrapModifiers(
+      (schema as z.ZodDefault<ZodTypeAny>).removeDefault() as ZodTypeAny
+    );
+  }
   return schema;
 }
 
@@ -710,7 +769,7 @@ function isBooleanSchema(schema: ZodTypeAny): boolean {
 function getEnumOptions(schema: ZodTypeAny): string[] | null {
   const inner = unwrapModifiers(schema);
   if (inner instanceof z.ZodEnum) {
-    return [...inner.options];
+    return [...inner.options].map(String);
   }
   return null;
 }
@@ -1113,6 +1172,8 @@ export async function generateStructuredResponse<
     strategy = 'single',
     onProgress,
     signal,
+    estimatedArraySize = 5,
+    maxChunkedCalls = MAX_ESTIMATED_CHUNKED_CALLS,
   } = options;
 
   if (inputSchema && input !== undefined) {
@@ -1120,6 +1181,33 @@ export async function generateStructuredResponse<
   }
 
   if (strategy === 'chunked') {
+    const estimatedCalls = estimateChunkedCalls(output, estimatedArraySize);
+    if (estimatedCalls > maxChunkedCalls) {
+      throw new StructuredOutputError(
+        `Schema too complex for chunked generation: estimated ${estimatedCalls} model calls ` +
+          `(limit is ${maxChunkedCalls}). ` +
+          'Pass estimatedArraySize with the real expected array length, or increase maxChunkedCalls if you are sure the device can handle it.',
+        '',
+        [
+          {
+            path: '$',
+            message: `~${estimatedCalls} estimated calls > limit ${maxChunkedCalls}`,
+          },
+        ]
+      );
+    }
+
+    const promptLen = prompt.length;
+    if (promptLen > STRUCTURED_PROMPT_BUDGET * 3) {
+      throw new StructuredOutputError(
+        `Prompt is too long for on-device inference: ${promptLen} chars ` +
+          `(recommended max ~${STRUCTURED_PROMPT_BUDGET * 3}). ` +
+          'Shorten your prompt or split the task into smaller requests.',
+        '',
+        [{ path: '$', message: `prompt length ${promptLen} chars` }]
+      );
+    }
+
     const assembled = await generateChunked(
       prompt,
       output,
